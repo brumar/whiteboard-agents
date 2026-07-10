@@ -1,5 +1,6 @@
 // Minimal offline Excalidraw viewer: renders a scene JSON through the real
 // excalidraw renderer so agents can "see" the board without network access.
+// window.__setScene lets a warm renderer swap the scene without a reload.
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { Excalidraw, restoreElements } from "@excalidraw/excalidraw";
@@ -32,6 +33,57 @@ async function main() {
       />
     </div>,
   );
+
+  // Replace the scene in place (warm renderer path). `focusIds` crops the
+  // viewport to those elements (e.g. a frame and its children).
+  window.__setScene = (rawElements, focusIds) => {
+    let restored;
+    try {
+      restored = restoreElements(rawElements, null);
+      window.__restoreError = null;
+    } catch (err) {
+      window.__restoreError = String(err);
+      return -1;
+    }
+    api.updateScene({ elements: restored });
+    const focus = focusIds
+      ? restored.filter((e) => focusIds.includes(e.id))
+      : restored.filter((e) => !e.isDeleted);
+    if (focus.length) api.scrollToContent(focus, { fitToContent: true });
+    return restored.filter((e) => !e.isDeleted).length;
+  };
+
+  // live mode (host's /view page): follow the room over SSE, read-only
+  if (window.__live || location.search.includes("live=1")) {
+    let scrolled = false;
+    const es = new EventSource("/events");
+    es.onmessage = (ev) => {
+      if (!api) return;
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "scene") {
+        try {
+          const restored = restoreElements(msg.elements, null);
+          api.updateScene({ elements: restored });
+          if (!scrolled && restored.length) {
+            api.scrollToContent(restored, { fitToContent: true });
+            scrolled = true;
+          }
+        } catch (err) {
+          window.__restoreError = String(err);
+        }
+      } else if (msg.type === "cursors") {
+        api.updateScene({
+          collaborators: new Map(
+            msg.cursors.map((c) => [
+              c.name,
+              { username: c.name, pointer: { x: c.x, y: c.y, tool: "pointer" }, button: "up" },
+            ]),
+          ),
+        });
+      }
+    };
+  }
+
   // signal readiness for the screenshotter
   const wait = setInterval(() => {
     if (api && api.getSceneElements().length >= 0) {

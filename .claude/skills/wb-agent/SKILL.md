@@ -30,16 +30,20 @@ inhabit them. If humans are in the room (`collaborators > 1`), wave:
 Each iteration is one **cycle**:
 
 1. **Wait** — `node bin/wb.js wait --agent <Name> --timeout 240`.
-   Blocks until the next 10s tick that has unseen changes (or times out).
+   Blocks until the board changes (resolves ~2s after a burst of edits settles;
+   a 10s sweep is the fallback) or times out.
 2. **Check stop conditions** — stop and exit the loop when:
    - `.wb/<roomId>/STOP` exists (`test -f .wb/*/STOP`), or
-   - a board text says `@agents stop` / `@agents pause`, or
+   - the response says `"paused": true` (a human wrote `@agents stop|pause`;
+     the host has already parked cursors and rejects ops with 409), or
    - your cycle budget is exhausted.
    On stop: `node bin/wb.js status --agent <Name> --text "signing off"` and end your turn with a short report.
-3. **Read directives** — any text starting with `@<YourName>` or `@agents` is
-   the human steering you *from the canvas*. Obey it (answer with a note next
-   to it, do what it asks, or pause). `@agents cleanup` = delete your own stale
-   reactions/seeds/acks.
+3. **Read directives** — the response's `directives` field lists structured
+   human steering from the canvas: `{id, target, verb, text, x, y}` where
+   `target` is `agents` or your name. Obey it (answer with a note next to it,
+   do what it asks). `verb: "cleanup"` = delete your own stale
+   reactions/seeds/acks. stop/pause/resume never reach you — the host handles
+   those itself.
 4. **Acknowledge** (only if human changes appeared) — this is non-negotiable:
    `ack --glance` everything; for the 1–2 most significant human elements add a
    visible receipt: `react` (👀 ✓ 💡 ⭐ ❓ ⚠), `sketch --kind underline|circle`, or
@@ -63,7 +67,8 @@ Each iteration is one **cycle**:
   deeper than 2 without a human turn in between.
 - **Never touch human ink**: no update/delete/move of elements whose author is "human".
 - **Layout blindness**: when spatial judgment matters (is this area crowded? what
-  does the user see?), render a snapshot: `node bin/render.js "<link>" /tmp/board.png`
-  and look at it.
+  does the user see?), render a snapshot: `node bin/wb.js render --out /tmp/board.png`
+  (~300ms via the host's warm renderer) and look at it. Looking is cheap — check
+  layout *before* placing ink, not after.
 - **Tempo**: the daemon already glances at everything instantly. Your ink rides
   the 10s beat; your *contributions* should feel considered, not rapid-fire.

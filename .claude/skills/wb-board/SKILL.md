@@ -6,8 +6,9 @@ description: Toolbox for interacting with a live Excalidraw whiteboard (excalidr
 # Whiteboard toolbox (Excalidraw live collab)
 
 Everything lives in `whiteboard-agents/` at the repo root. Run all commands from
-that directory. One **daemon** per agent holds the socket connection, cursor
-presence, scene state, and a localhost HTTP API; the `wb` CLI drives it.
+that directory. One **room host** process per room carries every agent identity
+(one socket per agent for cursor presence, one shared scene, one localhost HTTP
+API); the `wb` CLI drives it.
 
 ```bash
 cd whiteboard-agents && npm install   # first time only
@@ -18,12 +19,18 @@ cd whiteboard-agents && npm install   # first time only
 ```bash
 node bin/wb.js start --room "<link>" --agent Echo --color "#1971c2" --bg "#a5d8ff" --slot 0
 node bin/wb.js up --room "<link>"        # start the whole default cast (agents/personas.json)
-node bin/wb.js list                      # who's running
-node bin/wb.js health --agent Echo
-node bin/wb.js stop --all
+node bin/wb.js list                      # running rooms + their agents
+node bin/wb.js health
+node bin/wb.js stop --agent Echo         # detach one identity (host keeps running)
+node bin/wb.js stop --all                # stop the room host (all cursors leave)
 ```
 
+`start`/`up` are idempotent: if the room's host is already up they join the new
+agent(s) to it instead of spawning another process.
+
 `<link>` is a full `https://excalidraw.com/#room=<id>,<key>` URL (quote it — `#` and `,`).
+After the first command the key is stored at `.wb/<roomId>/room.key` (0600), so
+every later command accepts a bare `--room <id>` — stop passing the key around.
 All commands below take `--agent <name>` when more than one agent runs.
 
 ## Reading the board
@@ -31,14 +38,21 @@ All commands below take `--agent <name>` when more than one agent runs.
 ```bash
 node bin/wb.js scene            # summaries: id, type, text, x/y/w/h, author, version
 node bin/wb.js scene --full     # raw excalidraw elements
+node bin/wb.js scene --fields id,text,author   # trim summaries to just these keys (cheap reads)
 node bin/wb.js diff             # changes by others not yet acked
-node bin/wb.js wait --timeout 240   # long-poll: returns at the next 10s tick with changes
-node bin/render.js "<link>" board.png   # render the board to PNG offline (see layout/what the user sees)
+node bin/wb.js diff --since <sceneVersion>     # tiny answer when nothing changed since your cursor
+node bin/wb.js wait --timeout 240   # long-poll: resolves ~2s after the board changes (10s sweep as fallback)
+node bin/wb.js render --out board.png [--crop content|frame:<id>]   # PNG via the host's warm renderer (~300ms)
+node bin/wb.js view                 # URL of the live read-only viewer (SSE: scene + cursors)
+node bin/wb.js journal [--tail 50]  # replayable session journal (ops/acks/directives/joins, jsonl)
+node bin/render.js "<link>" board.png   # offline fallback when no host runs (boots its own Chromium)
 ```
 
 - `author` is `"human"` for user ink, or an agent name (from `customData.wb.agent`).
 - Scene coordinates: y grows downward; the user typically starts around (0,0)–(1000,600).
-- `wait`/`diff` also return `recentPointers` — where humans moved their cursor lately.
+- Every read returns `sceneVersion` (sum of element versions) — pass it back as `--since` to resume cheaply.
+- `wait`/`diff`/`scene` also return `humans` (a human is in the room) and `presence` —
+  one `{name, x, y, ageSec}` entry per recently-seen collaborator cursor.
 
 ## Acting
 
@@ -69,6 +83,10 @@ Complex/batched: `node bin/wb.js op --json '{"ops":[...]}'` with ops
 
 ## Rules
 
-- Never `update`/`delete` elements you don't own (the daemon refuses; don't `force` around it on human ink).
-- Acknowledge human work before contributing. Presence (cursor) is free; ink has a budget.
+- Never `update`/`delete` elements you don't own (the host refuses; don't `force` around it on human ink).
+- Acknowledge human work before contributing. Presence (cursor) is free; ink has a budget —
+  literally: ops are rate-limited (default 30/min/agent, 429 + retry-after beyond it).
+- If a response carries `"paused": true`, a human wrote `@agents stop|pause` on the board:
+  stand down until it says otherwise (ops return 409 meanwhile).
+- `wb down --room <id> --yes` purges a room's local state (seen maps, key, journal, logs).
 - The full interaction grammar and etiquette: `whiteboard-agents/INTERACTIONS.md`.

@@ -7,7 +7,8 @@
     "lib": "lib"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/crypto.test.js test/reconcile.test.js test/elements.test.js test/client.test.js test/daemon.test.js test/phase1.test.js test/roomhost.test.js test/phase3.test.js test/phase4.test.js",
+    "test:render": "node test/render-smoke.mjs"
   },
   "keywords": [],
   "author": "",
@@ -21,6 +22,7 @@
     "esbuild": "^0.28.1",
     "playwright-core": "^1.61.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "socket.io": "^4.8.3"
   }
 }

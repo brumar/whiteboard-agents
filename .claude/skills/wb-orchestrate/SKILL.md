@@ -16,8 +16,8 @@ budget per agent (default 100).
 
 ```bash
 cd whiteboard-agents && npm install --silent
-node bin/wb.js up --room "<link>"      # one daemon per persona, idempotent
-node bin/wb.js list                    # verify: alive + connected
+node bin/wb.js up --room "<link>"      # ONE room-host process carrying all personas, idempotent
+node bin/wb.js list                    # verify: alive + agents all connected
 rm -f .wb/<roomId>/STOP                # clear any stale stop flag
 ```
 
@@ -39,8 +39,8 @@ subagent doesn't need to look it up:
 ## 3. Supervise
 
 - Stay responsive to the user; the subagents run the boards.
-- Health checks: `node bin/wb.js list`, `wb health --agent <Name>`, or render a
-  snapshot (`node bin/render.js "<link>" /tmp/board.png`) to see the board.
+- Health checks: `node bin/wb.js list`, `wb health`, or render a snapshot
+  (`node bin/wb.js render --out /tmp/board.png`, ~300ms warm) to see the board.
 - Relay user wishes by writing to the canvas as any agent (`wb note/text`) or by
   messaging the subagents (SendMessage) — e.g. "user wants more challenge, less
   expansion".
@@ -55,6 +55,24 @@ node bin/wb.js stop --all                   # cursors leave the room
 
 The board itself persists (encrypted) in excalidraw's storage — nothing is lost
 when agents leave. Report to the user what each agent did (from their final reports).
+
+## Lazy mode (no parked sessions)
+
+Four brains parked on `wait --timeout 240` around the clock is the biggest
+cost in the system. When the user wants agents *available* rather than
+*continuously thinking*, start the host with an on-change hook and exit:
+
+```bash
+node bin/wb.js up --room "<link>" \
+  --on-change 'claude -p "Use the wb-agent skill. Board <link> changed (reason: $WB_REASON). Pick the persona(s) from $WB_AGENTS that should respond, run up to 5 cycles each, then exit."'
+```
+
+The host runs the command only when the board changes (human ink or a
+directive) **and** no brain currently holds a `/wait` — single-flight, with a
+`WB_SPAWN_COOLDOWN` (default 120 s) so a chatty board doesn't fork-bomb
+sessions. Env passed: `WB_ROOM`, `WB_AGENTS`, `WB_REASON`. Presence (cursors,
+glances, acks-on-sight) stays live the whole time — only the thinking is
+on-demand.
 
 ## Variations
 
