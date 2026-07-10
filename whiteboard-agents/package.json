@@ -7,7 +7,7 @@
     "lib": "lib"
   },
   "scripts": {
-    "test": "node --test 'test/*.test.js'",
+    "test": "node --test test/crypto.test.js test/reconcile.test.js test/elements.test.js test/client.test.js test/daemon.test.js test/phase1.test.js test/roomhost.test.js test/phase3.test.js test/phase4.test.js",
     "test:render": "node test/render-smoke.mjs"
   },
   "keywords": [],

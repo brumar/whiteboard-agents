@@ -1,5 +1,14 @@
 # Implementation pre-plan for PROPOSITIONS.md
 
+> **Status (2026-07-10): executed.** All phases (0–5) are implemented on this
+> branch, one commit per phase; 69 offline unit tests + a Chromium render
+> smoke (`npm run test:render`) are green. Open decisions were settled as:
+> node:test, drop `recentPointers` immediately (skills updated in lockstep),
+> warm renderer default-on (lazy launch, `WB_RENDER=0` opt-out; measured warm
+> ~360 ms), tombstone horizon 24 h without an offline-human guard. Spike A
+> (live excalidraw.com multi-socket check) could not be run from the dev
+> sandbox — the relay-fixture models it; verify once on a live room.
+
 Working notes for turning the 10 propositions into changes. Ordered by
 dependency and risk, not by proposition number: the safety net comes first,
 then behavior-preserving wins, then the one real refactor, then features that

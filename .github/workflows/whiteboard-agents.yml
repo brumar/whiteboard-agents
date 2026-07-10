@@ -1,0 +1,75 @@
+name: whiteboard-agents
+
+on:
+  push:
+    paths:
+      - "whiteboard-agents/**"
+      - ".github/workflows/whiteboard-agents.yml"
+  pull_request:
+    paths:
+      - "whiteboard-agents/**"
+      - ".github/workflows/whiteboard-agents.yml"
+  schedule:
+    # weekly schema-drift early warning against @excalidraw/excalidraw@latest
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: whiteboard-agents
+
+jobs:
+  unit:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: whiteboard-agents/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  render-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: whiteboard-agents/package-lock.json
+      - run: npm ci
+      - name: Install Chromium (matching playwright-core)
+        run: |
+          PW_VERSION=$(node -p "require('playwright-core/package.json').version")
+          PLAYWRIGHT_BROWSERS_PATH=$HOME/pw-browsers npx --yes playwright@$PW_VERSION install --with-deps chromium
+          echo "WB_CHROMIUM=$(ls $HOME/pw-browsers/chromium-*/chrome-linux/chrome | head -1)" >> $GITHUB_ENV
+      - name: Render a fixture scene through the real excalidraw renderer
+        run: npm run test:render
+
+  schema-drift:
+    # runs weekly (and on manual dispatch): validates our element factories
+    # against the LATEST excalidraw restore path, not the pinned version
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: whiteboard-agents/package-lock.json
+      - run: npm ci
+      - name: Upgrade to @excalidraw/excalidraw@latest
+        run: |
+          npm install --no-save @excalidraw/excalidraw@latest
+          node -p "'excalidraw ' + require('@excalidraw/excalidraw/package.json').version"
+      - name: Element factories through latest restoreElements
+        run: node --test test/elements.test.js
