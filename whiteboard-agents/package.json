@@ -7,7 +7,7 @@
     "lib": "lib"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test 'test/*.test.js'"
   },
   "keywords": [],
   "author": "",
@@ -21,6 +21,7 @@
     "esbuild": "^0.28.1",
     "playwright-core": "^1.61.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "socket.io": "^4.8.3"
   }
 }

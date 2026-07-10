@@ -25,6 +25,7 @@ import {
 const POLL_MS = 10_000; // board polling cadence
 const CURSOR_FPS_MS = 66; // ~15fps cursor animation frames
 const CORNER = { x: -560, y: -460 }; // Agents' Corner (status cards)
+const NO_PERSIST = process.env.WB_NO_PERSIST === "1"; // tests: no Firestore traffic
 
 export async function runDaemon(opts) {
   const {
@@ -108,14 +109,16 @@ export async function runDaemon(opts) {
   };
 
   // ---- connect + initial scene -------------------------------------------
-  try {
-    const persisted = await loadScene(roomId, roomKey);
-    if (persisted?.elements?.length) {
-      client.reconcile(persisted.elements);
-      logEvent(`loaded ${persisted.elements.length} persisted elements`);
+  if (!NO_PERSIST) {
+    try {
+      const persisted = await loadScene(roomId, roomKey);
+      if (persisted?.elements?.length) {
+        client.reconcile(persisted.elements);
+        logEvent(`loaded ${persisted.elements.length} persisted elements`);
+      }
+    } catch (err) {
+      logEvent(`persistence load failed: ${err.message}`);
     }
-  } catch (err) {
-    logEvent(`persistence load failed: ${err.message}`);
   }
 
   await client.connect();
@@ -187,7 +190,7 @@ export async function runDaemon(opts) {
   let saveTimer = null;
   const scheduleSave = (delay = 1500) => {
     state.dirty = true;
-    if (saveTimer) return;
+    if (NO_PERSIST || saveTimer) return;
     saveTimer = setTimeout(async () => {
       saveTimer = null;
       try {
@@ -615,9 +618,11 @@ export async function runDaemon(opts) {
           return respond(200, { ok: true, seen: body.ids?.length || 0 });
         }
         if (url.pathname === "/save") {
-          await mergeSaveScene(roomId, roomKey, client.getElements());
-          state.dirty = false;
-          return respond(200, { ok: true });
+          if (!NO_PERSIST) {
+            await mergeSaveScene(roomId, roomKey, client.getElements());
+            state.dirty = false;
+          }
+          return respond(200, { ok: true, skipped: NO_PERSIST || undefined });
         }
         if (url.pathname === "/quit") {
           respond(200, { ok: true });
