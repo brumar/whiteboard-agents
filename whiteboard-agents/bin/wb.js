@@ -33,9 +33,52 @@ function parseArgs(list) {
   return out;
 }
 
+let SECRET_KEY = null; // set once a room key is resolved; kept out of all output
+
 function die(msg) {
-  console.error(`wb: ${msg}`);
+  console.error(`wb: ${SECRET_KEY ? String(msg).replaceAll(SECRET_KEY, "…") : msg}`);
   process.exit(1);
+}
+
+// Room id without requiring the key ("<id>", "<id>,<key>" or a full link).
+function roomIdOf(room) {
+  try {
+    return parseRoomLink(room).roomId;
+  } catch {
+    return String(room).trim();
+  }
+}
+
+// Resolve {roomId, roomKey} from, in priority order: the --room link itself,
+// WB_ROOM_KEY, --key-file, then the room's persisted key file (written 0600 by
+// the host) — so the key stops appearing in argv after the first command.
+function resolveRoom() {
+  if (!args.room) die("this command requires --room");
+  let roomId, roomKey;
+  try {
+    ({ roomId, roomKey } = parseRoomLink(args.room));
+  } catch {
+    roomId = String(args.room).trim();
+  }
+  if (!roomKey && process.env.WB_ROOM_KEY) roomKey = process.env.WB_ROOM_KEY.trim();
+  if (!roomKey && args["key-file"]) {
+    roomKey = fs.readFileSync(args["key-file"], "utf8").trim();
+  }
+  if (!roomKey) {
+    const keyPath = path.join(STATE_DIR, roomId, "room.key");
+    if (fs.existsSync(keyPath)) roomKey = fs.readFileSync(keyPath, "utf8").trim();
+  }
+  if (!roomKey)
+    die(`no key for room ${roomId} — pass a full room link once, WB_ROOM_KEY, or --key-file`);
+  SECRET_KEY = roomKey;
+  return { roomId, roomKey };
+}
+
+// Persist the key (0600) so later commands and the host child never see it in argv.
+function persistRoomKey(roomId, roomKey) {
+  const dirPath = path.join(STATE_DIR, roomId);
+  fs.mkdirSync(dirPath, { recursive: true });
+  fs.writeFileSync(path.join(dirPath, "room.key"), roomKey, { mode: 0o600 });
 }
 
 function isAlive(pid) {
@@ -81,7 +124,7 @@ function legacyAgentInfos() {
 
 // Resolve a target host + agent name for observation/action commands.
 function resolveTarget({ agentRequired = true } = {}) {
-  const roomFilter = args.room ? parseRoomLink(args.room).roomId : null;
+  const roomFilter = args.room ? roomIdOf(args.room) : null;
   const rooms = roomInfos().filter((r) => isAlive(r.pid) && (!roomFilter || r.roomId === roomFilter));
   const candidates = [];
   for (const r of rooms) {
@@ -145,21 +188,23 @@ function aliveRoom(roomId) {
   }
 }
 
-async function spawnHost(roomLink, agentSpecs) {
-  const { roomId } = parseRoomLink(roomLink);
+async function spawnHost(room, agentSpecs) {
+  const { roomId, roomKey } = room;
   const dir = path.join(STATE_DIR, roomId);
   fs.mkdirSync(dir, { recursive: true });
   const roomInfoPath = path.join(dir, "room.json");
   if (fs.existsSync(roomInfoPath)) fs.unlinkSync(roomInfoPath);
   const logPath = path.join(dir, "host.log");
   const out = fs.openSync(logPath, "a");
+  // key travels via the 0600 key file, never via the child's argv
+  persistRoomKey(roomId, roomKey);
   const child = spawn(
     process.execPath,
     [
       fileURLToPath(import.meta.url),
       "host",
       "--room",
-      roomLink,
+      roomId,
       "--agents-json",
       JSON.stringify(agentSpecs),
       ...(args["on-change"] ? ["--on-change", args["on-change"]] : []),
@@ -192,13 +237,20 @@ setup (one host process per room carries all agent identities):
                                               brain is long-polling (env: WB_ROOM WB_AGENTS WB_REASON)
   wb list                                     running rooms and their agents
   wb stop [--agent <name>] [--all]            detach one agent, or stop the host
+  wb down --room <id> [--yes]                 stop the host AND purge .wb/<roomId>/ state
   wb health
+
+room addressing & secrets: after the first command with a full link, the key is
+stored at .wb/<roomId>/room.key (0600) — every command then accepts a bare
+--room <id>. Key sources (in order): link, WB_ROOM_KEY, --key-file, room.key.
 
 observing (all target one agent; --agent needed when several run):
   wb scene [--full] [--deleted] [--fields id,text,author]   board contents (summaries by default)
   wb diff [--since <sceneVersion>]            unseen changes by others
   wb wait [--timeout <s>]                     block until the board changes (~2s debounce)
   wb render [--out board.png] [--crop content|frame:<id>]   PNG through the host's warm renderer
+  wb view                                     print the live read-only viewer URL (/view, SSE-fed)
+  wb journal [--tail <n>]                     the room's replayable session journal (jsonl)
 
 acting:
   wb op --json '<op-or-{"ops":[...]}>'        high-level ops (see below); or pipe JSON on stdin
@@ -220,7 +272,7 @@ try {
   switch (cmd) {
     case "host": {
       // internal: the long-running room-host process behind `wb start`/`wb up`
-      const { roomId, roomKey } = parseRoomLink(args.room);
+      const { roomId, roomKey } = resolveRoom();
       const agents = JSON.parse(args["agents-json"] || "[]");
       await runRoomHost({
         roomId,
@@ -234,7 +286,7 @@ try {
 
     case "daemon": {
       // legacy internal: single-agent host (kept so old invocations work)
-      const { roomId, roomKey } = parseRoomLink(args.room);
+      const { roomId, roomKey } = resolveRoom();
       await runDaemon({
         roomId,
         roomKey,
@@ -249,8 +301,8 @@ try {
 
     case "start": {
       if (!args.room || !args.agent) die("start requires --room and --agent");
-      const { roomId } = parseRoomLink(args.room);
-      const existing = aliveRoom(roomId);
+      const room = resolveRoom();
+      const existing = aliveRoom(room.roomId);
       if (existing) {
         if ((existing.agents || []).some((a) => a.name === args.agent)) {
           print({ ok: true, alreadyRunning: true, ...existing });
@@ -265,7 +317,7 @@ try {
         print({ ok: true, joined: true, port: existing.port, ...r });
         break;
       }
-      const { info, health } = await spawnHost(args.room, [
+      const { info, health } = await spawnHost(room, [
         {
           name: args.agent,
           color: args.color,
@@ -279,7 +331,7 @@ try {
 
     case "up": {
       if (!args.room) die("up requires --room");
-      const { roomId } = parseRoomLink(args.room);
+      const room = resolveRoom();
       const file = args.personas || path.join(PKG_ROOT, "agents", "personas.json");
       const personas = JSON.parse(fs.readFileSync(file, "utf8")).personas;
       const specs = personas.map((p, i) => ({
@@ -288,7 +340,7 @@ try {
         background: p.background,
         slot: i,
       }));
-      const existing = aliveRoom(roomId);
+      const existing = aliveRoom(room.roomId);
       if (existing) {
         const present = new Set((existing.agents || []).map((a) => a.name));
         for (const s of specs) {
@@ -301,10 +353,10 @@ try {
           });
           console.log(`joined ${r.agent} (slot ${r.slot})`);
         }
-        print({ ok: true, ...aliveRoom(roomId) });
+        print({ ok: true, ...aliveRoom(room.roomId) });
         break;
       }
-      const { info, health } = await spawnHost(args.room, specs);
+      const { info, health } = await spawnHost(room, specs);
       print({ ok: true, ...info, health });
       break;
     }
@@ -317,7 +369,7 @@ try {
     }
 
     case "stop": {
-      const roomFilter = args.room ? parseRoomLink(args.room).roomId : null;
+      const roomFilter = args.room ? roomIdOf(args.room) : null;
       const rooms = roomInfos().filter(
         (r) => isAlive(r.pid) && (!roomFilter || r.roomId === roomFilter),
       );
@@ -531,6 +583,60 @@ try {
     case "save": {
       const { info } = resolveTarget({ agentRequired: false });
       print(await call(info, "POST", "/save"));
+      break;
+    }
+
+    case "journal": {
+      // prefer the live host; fall back to reading the file (host down)
+      const tail = Number(args.tail || 100);
+      try {
+        const { info } = resolveTarget({ agentRequired: false });
+        const { entries } = await call(info, "GET", `/journal?tail=${tail}`);
+        for (const e of entries) console.log(JSON.stringify(e));
+        break;
+      } catch {}
+      if (!args.room) die("no running host — pass --room <id> to read the journal file");
+      const p = path.join(STATE_DIR, roomIdOf(args.room), "journal.jsonl");
+      if (!fs.existsSync(p)) die(`no journal at ${p}`);
+      const lines = fs.readFileSync(p, "utf8").split("\n").filter(Boolean).slice(-tail);
+      for (const l of lines) console.log(l);
+      break;
+    }
+
+    case "view": {
+      const { info } = resolveTarget({ agentRequired: false });
+      console.log(`http://127.0.0.1:${info.port}/view`);
+      break;
+    }
+
+    case "down": {
+      if (!args.room) die("down requires --room <id-or-link>");
+      const roomId = roomIdOf(args.room);
+      const dirPath = path.join(STATE_DIR, roomId);
+      if (!fs.existsSync(dirPath)) die(`no state for room ${roomId}`);
+      if (!args.yes) {
+        process.stdout.write(`wb: delete all state for room ${roomId} (${dirPath})? [y/N] `);
+        const answer = (await readStdin()).trim().toLowerCase();
+        if (answer !== "y" && answer !== "yes") die("aborted");
+      }
+      const info = aliveRoom(roomId);
+      if (info) {
+        try {
+          await call(info, "POST", "/quit");
+        } catch {
+          try {
+            process.kill(info.pid);
+          } catch {}
+        }
+        // wait briefly for the process to exit so files aren't rewritten
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && isAlive(info.pid)) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        console.log(`stopped host for room ${roomId}`);
+      }
+      fs.rmSync(dirPath, { recursive: true, force: true });
+      console.log(`removed ${dirPath}`);
       break;
     }
 

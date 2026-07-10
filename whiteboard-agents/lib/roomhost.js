@@ -36,6 +36,9 @@ const TOMBSTONE_MS = Number(process.env.WB_TOMBSTONE_MS || 24 * 3600 * 1000); //
 const CORNER = { x: -560, y: -460 }; // Agents' Corner (status cards)
 const NO_PERSIST = process.env.WB_NO_PERSIST === "1"; // tests: no Firestore traffic
 const SPAWN_COOLDOWN_MS = Number(process.env.WB_SPAWN_COOLDOWN || 120) * 1000; // --on-change single-flight
+const OPS_PER_MIN = Number(process.env.WB_OPS_PER_MIN || 30); // politeness: ops budget per agent
+const SAVE_MIN_SPACING_MS = Number(process.env.WB_SAVE_SPACING_MS || 5000); // Firestore write spacing
+const JOURNAL_MAX_BYTES = 10 * 1024 * 1024; // rotate journal.jsonl at 10 MB
 const DEFAULT_COLOR = "#1971c2";
 const DEFAULT_BG = "#a5d8ff";
 
@@ -47,6 +50,13 @@ export async function runRoomHost(opts) {
   const dir = path.join(stateDir, roomId);
   fs.mkdirSync(dir, { recursive: true });
   const roomInfoPath = path.join(dir, "room.json");
+
+  // the room key stops living in argv: persist it (0600) so every later
+  // command can address the room by bare id (P10)
+  const keyPath = path.join(dir, "room.key");
+  try {
+    fs.writeFileSync(keyPath, roomKey, { mode: 0o600 });
+  } catch {}
 
   const scene = new Map(); // ONE reconciled store shared by every socket
   const agents = new Map(); // name -> agent record
@@ -63,7 +73,20 @@ export async function runRoomHost(opts) {
     pendingSpawnReason: null, // human-change|directive, consumed by --on-change
   };
 
-  const logEvent = (msg) => console.log(new Date().toISOString(), msg);
+  // the room key never reaches logs or error output
+  const redact = (s) => String(s).replaceAll(roomKey, "…");
+  const logEvent = (msg) => console.log(new Date().toISOString(), redact(msg));
+
+  // ---- session journal (P9b): the durable artifact of a board session ---------
+  const journalPath = path.join(dir, "journal.jsonl");
+  const journal = (entry) => {
+    try {
+      if (fs.existsSync(journalPath) && fs.statSync(journalPath).size > JOURNAL_MAX_BYTES) {
+        fs.renameSync(journalPath, `${journalPath}.1`);
+      }
+      fs.appendFileSync(journalPath, JSON.stringify({ ts: Date.now(), ...entry }) + "\n");
+    } catch {}
+  };
 
   // ---- authorship & summaries ----------------------------------------------
   const authorOf = (el) => el?.customData?.wb?.agent || "human";
@@ -194,18 +217,29 @@ export async function runRoomHost(opts) {
     }
   }
 
+  const journalDirective = (d, handled) =>
+    journal({
+      agent: "human",
+      event: "directive",
+      ids: [d.id],
+      summary: `${d.text}${handled ? " (handled by host)" : ""}`,
+    });
+
   function handleDirective(d) {
     if (d.target === "agents" && (d.verb === "stop" || d.verb === "pause")) {
       for (const agent of agents.values()) agent.seen.set(d.id, getEl(d.id)?.version ?? 0);
+      journalDirective(d, true);
       pauseHost(`board directive: ${d.text}`);
       return;
     }
     if (d.target === "agents" && d.verb === "resume") {
       for (const agent of agents.values()) agent.seen.set(d.id, getEl(d.id)?.version ?? 0);
       directives.delete(d.id);
+      journalDirective(d, true);
       resumeHost();
       return;
     }
+    if (!directives.has(d.id)) journalDirective(d, false);
     directives.set(d.id, d); // cleanup / summons / free-form: brains act on these
   }
 
@@ -228,10 +262,19 @@ export async function runRoomHost(opts) {
           directives.delete(el.id); // deleted or edited away
         }
       }
-      const humanChange = els.some((e) => authorOf(e) === "human");
+      const humanEls = els.filter((e) => authorOf(e) === "human");
+      if (humanEls.length) {
+        journal({
+          agent: "human",
+          event: "op",
+          ids: humanEls.map((e) => e.id),
+          summary: humanEls.map((e) => e.type).join(","),
+        });
+      }
       if (sawDirective) state.pendingSpawnReason = "directive";
-      else if (humanChange && !state.pendingSpawnReason) state.pendingSpawnReason = "human-change";
+      else if (humanEls.length && !state.pendingSpawnReason) state.pendingSpawnReason = "human-change";
       scheduleWake();
+      pushSceneToViewers();
       if (state.paused) return; // parked: no glances while paused
       const foreignFor = new Map(); // per glancing agent
       for (const agent of agents.values()) {
@@ -282,6 +325,7 @@ export async function runRoomHost(opts) {
       animQueue: [],
       animCurrent: null,
       lastSent: null,
+      opBucket: { tokens: OPS_PER_MIN, refilledAt: Date.now() },
     };
     await agent.client.connect();
     agents.set(name, agent);
@@ -291,6 +335,7 @@ export async function runRoomHost(opts) {
     }
     writeInfoFiles();
     logEvent(`agent ${name} joined as ${agent.client.socket?.id} (slot ${agent.slot})`);
+    journal({ agent: name, event: "join" });
     return agent;
   }
 
@@ -317,6 +362,7 @@ export async function runRoomHost(opts) {
     }
     writeInfoFiles();
     logEvent(`agent ${name} detached`);
+    journal({ agent: name, event: "leave" });
   }
 
   const resolveAgent = (nameOrNull) => {
@@ -422,11 +468,15 @@ export async function runRoomHost(opts) {
   }
 
   let saveTimer = null;
+  let lastSaveAt = 0;
   const scheduleSave = (delay = 1500) => {
     state.dirty = true;
     if (NO_PERSIST || saveTimer) return;
+    // politeness: never write Firestore more often than SAVE_MIN_SPACING_MS
+    const spacing = Math.max(delay, lastSaveAt + SAVE_MIN_SPACING_MS - Date.now());
     saveTimer = setTimeout(async () => {
       saveTimer = null;
+      lastSaveAt = Date.now();
       try {
         compactScene();
         await mergeSaveScene(roomId, roomKey, getElements(), { drop: compactable });
@@ -435,7 +485,7 @@ export async function runRoomHost(opts) {
       } catch (err) {
         logEvent(`persist failed: ${err.message}`);
       }
-    }, delay);
+    }, spacing);
   };
   setInterval(() => {
     if (state.dirty && !saveTimer) scheduleSave(0);
@@ -457,6 +507,7 @@ export async function runRoomHost(opts) {
     await agent.client.syncElements(els);
     saveSeen(agent);
     scheduleSave();
+    pushSceneToViewers();
     return els.map((e) => e.id);
   }
 
@@ -723,6 +774,7 @@ export async function runRoomHost(opts) {
     await agent.client.syncElements([next]);
     saveSeen(agent);
     scheduleSave();
+    pushSceneToViewers();
     return [id];
   }
 
@@ -846,6 +898,86 @@ export async function runRoomHost(opts) {
     if (d) handleDirective(d);
   }
 
+  // ---- op rate limiter (P10): encodes politeness, generous by default ----------
+  function takeOpTokens(agent, n) {
+    const b = agent.opBucket;
+    const now = Date.now();
+    b.tokens = Math.min(OPS_PER_MIN, b.tokens + ((now - b.refilledAt) / 60_000) * OPS_PER_MIN);
+    b.refilledAt = now;
+    if (b.tokens < n) {
+      const retryAfterSec = Math.ceil(((n - b.tokens) / OPS_PER_MIN) * 60);
+      throw Object.assign(new Error(`op rate limit (${OPS_PER_MIN}/min) — retry in ${retryAfterSec}s`), {
+        status: 429,
+        retryAfterSec,
+      });
+    }
+    b.tokens -= n;
+  }
+
+  // ---- live viewer (P9a): /view + SSE /events, read-only ------------------------
+  const sseClients = new Set();
+  const sseSend = (payload) => {
+    if (!sseClients.size) return;
+    const msg = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const res of sseClients) res.write(msg);
+  };
+  function pushSceneToViewers() {
+    sseSend({ type: "scene", elements: getElements({ includeDeleted: false }) });
+  }
+  // cursor stream: agents' animated cursors + human peers, ~7fps, only on movement
+  let lastCursorFrame = "";
+  setInterval(() => {
+    if (!sseClients.size) return;
+    prunePeers();
+    const cursors = [
+      ...[...agents.values()].map((a) => ({
+        name: `🤖 ${a.name}`,
+        x: Math.round(a.cursor.x),
+        y: Math.round(a.cursor.y),
+      })),
+      ...[...state.peers.entries()]
+        .filter(([, p]) => p.x != null)
+        .map(([name, p]) => ({ name, x: p.x, y: p.y })),
+    ];
+    const frame = JSON.stringify(cursors);
+    if (frame === lastCursorFrame) return;
+    lastCursorFrame = frame;
+    sseSend({ type: "cursors", cursors });
+  }, 150);
+
+  let viewerAssets = null; // {outDir, bundlePath} once bundled
+  async function getViewerAssets() {
+    if (!viewerAssets) {
+      const { bundleViewer } = await import("./render.js");
+      viewerAssets = await bundleViewer();
+    }
+    return viewerAssets;
+  }
+  const VIEW_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>wb · ${roomId}</title><link rel="stylesheet" href="/app.css"><style>html,body,#root{margin:0;width:100%;height:100%}</style></head><body><div id="root"></div><script>window.__live=true</script><script src="/app.js"></script></body></html>`;
+
+  function serveViewerAsset(req, res, url) {
+    const assetRoot = path.join(
+      path.dirname(new URL(import.meta.url).pathname),
+      "..",
+      "node_modules",
+      "@excalidraw",
+      "excalidraw",
+      "dist",
+      "prod",
+    );
+    let file = null;
+    if (url === "/app.js") file = viewerAssets.bundlePath;
+    else if (url.startsWith("/assets/")) file = path.join(assetRoot, url.slice(8));
+    else file = path.join(viewerAssets.outDir, path.basename(url));
+    if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
+      if (file.endsWith(".css")) res.setHeader("content-type", "text/css");
+      if (file.endsWith(".woff2")) res.setHeader("content-type", "font/woff2");
+      res.end(fs.readFileSync(file));
+      return true;
+    }
+    return false;
+  }
+
   // ---- warm renderer (lazy) ----------------------------------------------------
   let renderer = null;
   async function getRenderer() {
@@ -937,6 +1069,36 @@ export async function runRoomHost(opts) {
         res.writeHead(200, { "content-type": "image/png", "x-rendered-elements": String(rendered) });
         return res.end(png);
       }
+      if (req.method === "GET" && url.pathname === "/view") {
+        await getViewerAssets();
+        res.writeHead(200, { "content-type": "text/html" });
+        return res.end(VIEW_HTML);
+      }
+      if (req.method === "GET" && url.pathname === "/events") {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        sseClients.add(res);
+        req.on("close", () => sseClients.delete(res));
+        res.write(
+          `data: ${JSON.stringify({ type: "scene", elements: getElements({ includeDeleted: false }) })}\n\n`,
+        );
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/journal") {
+        const tail = Number(url.searchParams.get("tail") || 100);
+        const journalPathNow = fs.existsSync(journalPath) ? journalPath : null;
+        const lines = journalPathNow
+          ? fs.readFileSync(journalPathNow, "utf8").split("\n").filter(Boolean).slice(-tail)
+          : [];
+        return respond(200, { entries: lines.map((l) => JSON.parse(l)) });
+      }
+      // viewer static assets (only once /view has been requested)
+      if (req.method === "GET" && viewerAssets && serveViewerAsset(req, res, url.pathname)) {
+        return;
+      }
       if (req.method === "POST") {
         const body = await readBody(req);
         const agentName = url.searchParams.get("agent") || body.agent;
@@ -946,9 +1108,11 @@ export async function runRoomHost(opts) {
           if (state.paused && ops.some((o) => o.op !== "status")) {
             return respond(409, { error: "paused by board directive (@agents resume to continue)" });
           }
+          takeOpTokens(agent, ops.length);
           const ids = [];
           for (const op of ops) ids.push(...(await applyOp(agent, op)));
           logEvent(`ops[${agent.name}]: ${ops.map((o) => o.op).join(",")} -> ${ids.join(",")}`);
+          journal({ agent: agent.name, event: "op", ids, summary: ops.map((o) => o.op).join(",") });
           return respond(200, { ids });
         }
         if (url.pathname === "/agents") {
@@ -1013,6 +1177,7 @@ export async function runRoomHost(opts) {
             const t = bbox(getEl(body.ids[0]));
             if (t) enqueueMove(agent, t.x + t.w / 2 + 25, t.y - 15, 700);
           }
+          if (body.ids?.length) journal({ agent: agent.name, event: "ack", ids: body.ids });
           return respond(200, { ok: true, seen: body.ids?.length || 0 });
         }
         if (url.pathname === "/save") {
@@ -1048,7 +1213,8 @@ export async function runRoomHost(opts) {
       }
       respond(404, { error: "not found" });
     } catch (err) {
-      respond(err.status || 500, { error: err.message });
+      if (err.retryAfterSec) res.setHeader("retry-after", String(err.retryAfterSec));
+      respond(err.status || 500, { error: redact(err.message) });
     }
   });
 
