@@ -34,13 +34,16 @@ Each iteration is one **cycle**:
    a 10s sweep is the fallback) or times out.
 2. **Check stop conditions** — stop and exit the loop when:
    - `.wb/<roomId>/STOP` exists (`test -f .wb/*/STOP`), or
-   - a board text says `@agents stop` / `@agents pause`, or
+   - the response says `"paused": true` (a human wrote `@agents stop|pause`;
+     the host has already parked cursors and rejects ops with 409), or
    - your cycle budget is exhausted.
    On stop: `node bin/wb.js status --agent <Name> --text "signing off"` and end your turn with a short report.
-3. **Read directives** — any text starting with `@<YourName>` or `@agents` is
-   the human steering you *from the canvas*. Obey it (answer with a note next
-   to it, do what it asks, or pause). `@agents cleanup` = delete your own stale
-   reactions/seeds/acks.
+3. **Read directives** — the response's `directives` field lists structured
+   human steering from the canvas: `{id, target, verb, text, x, y}` where
+   `target` is `agents` or your name. Obey it (answer with a note next to it,
+   do what it asks). `verb: "cleanup"` = delete your own stale
+   reactions/seeds/acks. stop/pause/resume never reach you — the host handles
+   those itself.
 4. **Acknowledge** (only if human changes appeared) — this is non-negotiable:
    `ack --glance` everything; for the 1–2 most significant human elements add a
    visible receipt: `react` (👀 ✓ 💡 ⭐ ❓ ⚠), `sketch --kind underline|circle`, or

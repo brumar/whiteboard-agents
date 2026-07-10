@@ -7,6 +7,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { ExcalidrawClient } from "./client.js";
 import { loadScene, mergeSaveScene, getSceneVersion } from "./persistence.js";
 import {
@@ -34,11 +35,13 @@ const PRESENCE_TTL_MS = 60_000; // how long a peer sighting counts as "present"
 const TOMBSTONE_MS = Number(process.env.WB_TOMBSTONE_MS || 24 * 3600 * 1000); // compaction horizon
 const CORNER = { x: -560, y: -460 }; // Agents' Corner (status cards)
 const NO_PERSIST = process.env.WB_NO_PERSIST === "1"; // tests: no Firestore traffic
+const SPAWN_COOLDOWN_MS = Number(process.env.WB_SPAWN_COOLDOWN || 120) * 1000; // --on-change single-flight
 const DEFAULT_COLOR = "#1971c2";
 const DEFAULT_BG = "#a5d8ff";
 
 export async function runRoomHost(opts) {
   const { roomId, roomKey, agents: initialAgents = [], stateDir } = opts;
+  const onChange = opts.onChange || process.env.WB_ON_CHANGE || null;
   if (!initialAgents.length) throw new Error("room host needs at least one agent");
 
   const dir = path.join(stateDir, roomId);
@@ -56,6 +59,8 @@ export async function runRoomHost(opts) {
     dirty: false,
     lastForeign: null, // last foreign element added (for auto-glance)
     startedAt: Date.now(),
+    paused: false, // set by an @agents stop|pause board directive
+    pendingSpawnReason: null, // human-change|directive, consumed by --on-change
   };
 
   const logEvent = (msg) => console.log(new Date().toISOString(), msg);
@@ -128,11 +133,106 @@ export async function runRoomHost(opts) {
     if (isHumanName(username)) startAnimLoop();
   };
 
+  // ---- board directives (P7) -------------------------------------------------
+  // Human text starting with @agents or @<AgentName> steers the room from the
+  // canvas. stop/pause/resume are handled by the host itself; everything else
+  // is surfaced to brains as `directives` in /diff and /wait.
+  const directives = new Map(); // elementId -> {id, target, verb, text, x, y}
+
+  function parseDirective(el) {
+    if (!el || el.type !== "text" || el.isDeleted) return null;
+    if (el.customData?.wb) return null; // agent ink can't steer
+    const text = String(el.originalText ?? el.text ?? "").trim();
+    const m = text.match(/^@(\S+)\b\s*(\S+)?/);
+    if (!m) return null;
+    let target;
+    if (/^agents$/i.test(m[1])) target = "agents";
+    else {
+      const hit = [...agents.keys()].find((n) => n.toLowerCase() === m[1].toLowerCase());
+      if (!hit) return null; // mention of someone not in the cast
+      target = hit;
+    }
+    return {
+      id: el.id,
+      target,
+      verb: (m[2] || "").toLowerCase() || null,
+      text,
+      x: Math.round(el.x),
+      y: Math.round(el.y),
+    };
+  }
+
+  async function pauseHost(reason) {
+    if (state.paused) return;
+    state.paused = true;
+    stopAnimLoop();
+    for (const agent of agents.values()) {
+      agent.animQueue.length = 0;
+      agent.animCurrent = null;
+    }
+    logEvent(`paused (${reason})`);
+    for (const agent of agents.values()) {
+      try {
+        await applyOp(agent, { op: "status", text: "paused by board" });
+      } catch (err) {
+        logEvent(`status update failed for ${agent.name}: ${err.message}`);
+      }
+    }
+  }
+
+  async function resumeHost() {
+    if (!state.paused) return;
+    state.paused = false;
+    startAnimLoop();
+    logEvent("resumed by board");
+    for (const agent of agents.values()) {
+      try {
+        await applyOp(agent, { op: "status", text: "resumed" });
+      } catch (err) {
+        logEvent(`status update failed for ${agent.name}: ${err.message}`);
+      }
+    }
+  }
+
+  function handleDirective(d) {
+    if (d.target === "agents" && (d.verb === "stop" || d.verb === "pause")) {
+      for (const agent of agents.values()) agent.seen.set(d.id, getEl(d.id)?.version ?? 0);
+      pauseHost(`board directive: ${d.text}`);
+      return;
+    }
+    if (d.target === "agents" && d.verb === "resume") {
+      for (const agent of agents.values()) agent.seen.set(d.id, getEl(d.id)?.version ?? 0);
+      directives.delete(d.id);
+      resumeHost();
+      return;
+    }
+    directives.set(d.id, d); // cleanup / summons / free-form: brains act on these
+  }
+
+  const directivesFor = (agent) =>
+    [...directives.values()].filter(
+      (d) => !getEl(d.id)?.isDeleted && (d.target === "agents" || d.target === agent?.name),
+    );
+
   // ---- scene events (wired to the primary socket only) -----------------------
   function wireSceneEvents(client) {
     client.on("scene-changed", (els) => {
       state.dirty = true; // the 60s dirty sweep persists foreign changes
+      let sawDirective = false;
+      for (const el of els) {
+        const d = parseDirective(el);
+        if (d) {
+          sawDirective = true;
+          handleDirective(d);
+        } else if (directives.has(el.id)) {
+          directives.delete(el.id); // deleted or edited away
+        }
+      }
+      const humanChange = els.some((e) => authorOf(e) === "human");
+      if (sawDirective) state.pendingSpawnReason = "directive";
+      else if (humanChange && !state.pendingSpawnReason) state.pendingSpawnReason = "human-change";
       scheduleWake();
+      if (state.paused) return; // parked: no glances while paused
       const foreignFor = new Map(); // per glancing agent
       for (const agent of agents.values()) {
         const foreign = els.filter((e) => authorOf(e) !== agent.name);
@@ -240,7 +340,7 @@ export async function runRoomHost(opts) {
 
   let animFrame = null;
   function startAnimLoop() {
-    if (animFrame) return;
+    if (animFrame || state.paused) return;
     animFrame = setInterval(async () => {
       for (const agent of agents.values()) {
         if (!agent.animCurrent) {
@@ -650,10 +750,57 @@ export async function runRoomHost(opts) {
     if (wakeTimer) clearTimeout(wakeTimer);
     wakeTimer = setTimeout(() => {
       wakeTimer = null;
+      const hadListeners = waiters.length > 0;
       flushWaiters();
+      // event-spawned brains (P2b): a burst with human changes or directives
+      // and nobody long-polling means nobody will act — start a brain.
+      const reason = state.pendingSpawnReason;
+      state.pendingSpawnReason = null;
+      if (reason && !hadListeners) maybeSpawnBrain(reason);
     }, DEBOUNCE_MS);
   }
   setInterval(flushWaiters, POLL_MS); // fallback sweep
+
+  // ---- --on-change brain spawner (single-flight + cooldown) --------------------
+  let spawnChild = null;
+  let lastSpawnAt = 0;
+  let spawnQueuedReason = null;
+  function maybeSpawnBrain(reason) {
+    if (!onChange || state.paused) return;
+    spawnQueuedReason = reason;
+    trySpawnBrain();
+  }
+  function trySpawnBrain() {
+    if (!spawnQueuedReason || spawnChild) return; // single-flight
+    const wait = SPAWN_COOLDOWN_MS - (Date.now() - lastSpawnAt);
+    if (wait > 0) {
+      setTimeout(trySpawnBrain, wait + 10);
+      return;
+    }
+    const reason = spawnQueuedReason;
+    spawnQueuedReason = null;
+    lastSpawnAt = Date.now();
+    logEvent(`on-change: spawning brain (${reason})`);
+    spawnChild = spawn(onChange, {
+      shell: true,
+      stdio: "inherit", // lands in host.log
+      env: {
+        ...process.env,
+        WB_ROOM: roomId,
+        WB_AGENTS: [...agents.keys()].join(","),
+        WB_REASON: reason,
+      },
+    });
+    spawnChild.on("exit", (code) => {
+      spawnChild = null;
+      logEvent(`on-change: brain exited (${code})`);
+      if (spawnQueuedReason) trySpawnBrain();
+    });
+    spawnChild.on("error", (err) => {
+      spawnChild = null;
+      logEvent(`on-change: spawn failed: ${err.message}`);
+    });
+  }
 
   const contextInfo = (agent) => {
     prunePeers();
@@ -670,6 +817,8 @@ export async function runRoomHost(opts) {
         ? { cursor: { x: Math.round(agent.cursor.x), y: Math.round(agent.cursor.y) } }
         : {}),
       sceneVersion: getSceneVersion(getElements()),
+      ...(state.paused ? { paused: true } : {}),
+      ...(agent && directivesFor(agent).length ? { directives: directivesFor(agent) } : {}),
     };
   };
 
@@ -690,6 +839,12 @@ export async function runRoomHost(opts) {
   logEvent(
     `room host up: ${agents.size} agents, ${primary.client.collaborators.size} sockets in room`,
   );
+
+  // directives already on the board (e.g. a standing "@agents pause") apply now
+  for (const el of scene.values()) {
+    const d = parseDirective(el);
+    if (d) handleDirective(d);
+  }
 
   // ---- warm renderer (lazy) ----------------------------------------------------
   let renderer = null;
@@ -788,6 +943,9 @@ export async function runRoomHost(opts) {
         if (url.pathname === "/op") {
           const agent = resolveAgent(agentName);
           const ops = Array.isArray(body.ops) ? body.ops : [body];
+          if (state.paused && ops.some((o) => o.op !== "status")) {
+            return respond(409, { error: "paused by board directive (@agents resume to continue)" });
+          }
           const ids = [];
           for (const op of ops) ids.push(...(await applyOp(agent, op)));
           logEvent(`ops[${agent.name}]: ${ops.map((o) => o.op).join(",")} -> ${ids.join(",")}`);
@@ -804,6 +962,7 @@ export async function runRoomHost(opts) {
         }
         if (url.pathname === "/cursor") {
           const agent = resolveAgent(agentName);
+          if (state.paused) return respond(409, { error: "paused by board directive" });
           let { x, y, ms = 800, target } = body;
           if (target) {
             const t = bbox(getEl(target));
@@ -817,6 +976,7 @@ export async function runRoomHost(opts) {
         }
         if (url.pathname === "/gesture") {
           const agent = resolveAgent(agentName);
+          if (state.paused) return respond(409, { error: "paused by board directive" });
           startAnimLoop();
           const t = body.target ? bbox(getEl(body.target)) : { x: body.x, y: body.y, w: 0, h: 0 };
           if (!t) return respond(404, { error: "target not found" });

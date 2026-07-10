@@ -162,6 +162,7 @@ async function spawnHost(roomLink, agentSpecs) {
       roomLink,
       "--agents-json",
       JSON.stringify(agentSpecs),
+      ...(args["on-change"] ? ["--on-change", args["on-change"]] : []),
     ],
     { detached: true, stdio: ["ignore", out, out] },
   );
@@ -185,7 +186,10 @@ const HELP = `wb — whiteboard agent control
 setup (one host process per room carries all agent identities):
   wb start --room <link> --agent <name> [--color <hex>] [--bg <hex>] [--slot <n>]
                                               spawn the room host, or join it if already up
-  wb up --room <link> [--personas <file>]     start/complete the whole cast (agents/personas.json)
+  wb up --room <link> [--personas <file>] [--on-change '<cmd>']
+                                              start/complete the whole cast (agents/personas.json);
+                                              --on-change runs <cmd> when the board changes and no
+                                              brain is long-polling (env: WB_ROOM WB_AGENTS WB_REASON)
   wb list                                     running rooms and their agents
   wb stop [--agent <name>] [--all]            detach one agent, or stop the host
   wb health
@@ -218,7 +222,13 @@ try {
       // internal: the long-running room-host process behind `wb start`/`wb up`
       const { roomId, roomKey } = parseRoomLink(args.room);
       const agents = JSON.parse(args["agents-json"] || "[]");
-      await runRoomHost({ roomId, roomKey, agents, stateDir: STATE_DIR });
+      await runRoomHost({
+        roomId,
+        roomKey,
+        agents,
+        stateDir: STATE_DIR,
+        onChange: args["on-change"] || null,
+      });
       break; // keeps running (server + intervals hold the loop)
     }
 

@@ -56,6 +56,24 @@ node bin/wb.js stop --all                   # cursors leave the room
 The board itself persists (encrypted) in excalidraw's storage — nothing is lost
 when agents leave. Report to the user what each agent did (from their final reports).
 
+## Lazy mode (no parked sessions)
+
+Four brains parked on `wait --timeout 240` around the clock is the biggest
+cost in the system. When the user wants agents *available* rather than
+*continuously thinking*, start the host with an on-change hook and exit:
+
+```bash
+node bin/wb.js up --room "<link>" \
+  --on-change 'claude -p "Use the wb-agent skill. Board <link> changed (reason: $WB_REASON). Pick the persona(s) from $WB_AGENTS that should respond, run up to 5 cycles each, then exit."'
+```
+
+The host runs the command only when the board changes (human ink or a
+directive) **and** no brain currently holds a `/wait` — single-flight, with a
+`WB_SPAWN_COOLDOWN` (default 120 s) so a chatty board doesn't fork-bomb
+sessions. Env passed: `WB_ROOM`, `WB_AGENTS`, `WB_REASON`. Presence (cursors,
+glances, acks-on-sight) stays live the whole time — only the thinking is
+on-demand.
+
 ## Variations
 
 - **Solo agent**: skip `up`, use the wb-agent skill directly with one persona.
