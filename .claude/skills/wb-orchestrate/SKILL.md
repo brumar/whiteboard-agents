@@ -16,8 +16,8 @@ budget per agent (default 100).
 
 ```bash
 cd whiteboard-agents && npm install --silent
-node bin/wb.js up --room "<link>"      # one daemon per persona, idempotent
-node bin/wb.js list                    # verify: alive + connected
+node bin/wb.js up --room "<link>"      # ONE room-host process carrying all personas, idempotent
+node bin/wb.js list                    # verify: alive + agents all connected
 rm -f .wb/<roomId>/STOP                # clear any stale stop flag
 ```
 
@@ -39,8 +39,8 @@ subagent doesn't need to look it up:
 ## 3. Supervise
 
 - Stay responsive to the user; the subagents run the boards.
-- Health checks: `node bin/wb.js list`, `wb health --agent <Name>`, or render a
-  snapshot (`node bin/render.js "<link>" /tmp/board.png`) to see the board.
+- Health checks: `node bin/wb.js list`, `wb health`, or render a snapshot
+  (`node bin/wb.js render --out /tmp/board.png`, ~300ms warm) to see the board.
 - Relay user wishes by writing to the canvas as any agent (`wb note/text`) or by
   messaging the subagents (SendMessage) — e.g. "user wants more challenge, less
   expansion".

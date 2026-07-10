@@ -46,7 +46,9 @@ export async function saveScene(roomId, roomKey, elements) {
 }
 
 // Merge-save: load remote, reconcile with ours (higher version wins), save union.
-export async function mergeSaveScene(roomId, roomKey, localElements) {
+// `drop` (optional predicate) filters the merged set before saving — used for
+// tombstone compaction, so ghosts leave the persisted scene too.
+export async function mergeSaveScene(roomId, roomKey, localElements, { drop } = {}) {
   let remote = null;
   try {
     remote = await loadScene(roomId, roomKey);
@@ -60,7 +62,8 @@ export async function mergeSaveScene(roomId, roomKey, localElements) {
     const prev = merged.get(el.id);
     if (!prev || el.version > prev.version) merged.set(el.id, el);
   }
-  const elements = [...merged.values()];
+  let elements = [...merged.values()];
+  if (drop) elements = elements.filter((el) => !drop(el));
   await saveScene(roomId, roomKey, elements);
   return elements;
 }

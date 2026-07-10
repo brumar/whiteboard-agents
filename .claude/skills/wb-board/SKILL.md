@@ -6,8 +6,9 @@ description: Toolbox for interacting with a live Excalidraw whiteboard (excalidr
 # Whiteboard toolbox (Excalidraw live collab)
 
 Everything lives in `whiteboard-agents/` at the repo root. Run all commands from
-that directory. One **daemon** per agent holds the socket connection, cursor
-presence, scene state, and a localhost HTTP API; the `wb` CLI drives it.
+that directory. One **room host** process per room carries every agent identity
+(one socket per agent for cursor presence, one shared scene, one localhost HTTP
+API); the `wb` CLI drives it.
 
 ```bash
 cd whiteboard-agents && npm install   # first time only
@@ -18,10 +19,14 @@ cd whiteboard-agents && npm install   # first time only
 ```bash
 node bin/wb.js start --room "<link>" --agent Echo --color "#1971c2" --bg "#a5d8ff" --slot 0
 node bin/wb.js up --room "<link>"        # start the whole default cast (agents/personas.json)
-node bin/wb.js list                      # who's running
-node bin/wb.js health --agent Echo
-node bin/wb.js stop --all
+node bin/wb.js list                      # running rooms + their agents
+node bin/wb.js health
+node bin/wb.js stop --agent Echo         # detach one identity (host keeps running)
+node bin/wb.js stop --all                # stop the room host (all cursors leave)
 ```
+
+`start`/`up` are idempotent: if the room's host is already up they join the new
+agent(s) to it instead of spawning another process.
 
 `<link>` is a full `https://excalidraw.com/#room=<id>,<key>` URL (quote it — `#` and `,`).
 All commands below take `--agent <name>` when more than one agent runs.
@@ -35,7 +40,8 @@ node bin/wb.js scene --fields id,text,author   # trim summaries to just these ke
 node bin/wb.js diff             # changes by others not yet acked
 node bin/wb.js diff --since <sceneVersion>     # tiny answer when nothing changed since your cursor
 node bin/wb.js wait --timeout 240   # long-poll: resolves ~2s after the board changes (10s sweep as fallback)
-node bin/render.js "<link>" board.png   # render the board to PNG offline (see layout/what the user sees)
+node bin/wb.js render --out board.png [--crop content|frame:<id>]   # PNG via the host's warm renderer (~300ms)
+node bin/render.js "<link>" board.png   # offline fallback when no host runs (boots its own Chromium)
 ```
 
 - `author` is `"human"` for user ink, or an agent name (from `customData.wb.agent`).

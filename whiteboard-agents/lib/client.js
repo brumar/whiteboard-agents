@@ -12,16 +12,26 @@ const WS_EVENTS = {
 };
 
 export class ExcalidrawClient extends EventEmitter {
-  constructor({ roomId, roomKey, username }) {
+  constructor({ roomId, roomKey, username, scene, sceneReadOnly = false }) {
     super();
     this.roomId = roomId;
     this.roomKey = roomKey;
     this.username = username || "agent";
     this.socket = null;
     this.initialized = false;
-    // scene: Map<elementId, element> — reconciled view of the board
-    this.scene = new Map();
+    // scene: Map<elementId, element> — reconciled view of the board.
+    // Injectable so several sockets (one per agent identity) can share one
+    // store; read-only sockets skip scene decryption entirely (the shared
+    // store is fed by exactly one primary socket).
+    this.scene = scene || new Map();
+    this.sceneReadOnly = sceneReadOnly;
     this.collaborators = new Set();
+  }
+
+  // Promote a read-only socket to scene processing (used when the previous
+  // primary socket of a shared scene detaches).
+  setSceneReadOnly(readOnly) {
+    this.sceneReadOnly = readOnly;
   }
 
   connect() {
@@ -57,16 +67,23 @@ export class ExcalidrawClient extends EventEmitter {
 
       socket.on("new-user", () => {
         // A collaborator just joined: send them the full scene we know.
-        this.broadcastScene("SCENE_INIT", this.getElements(), true);
+        // Read-only sockets stay quiet — their primary answers for the room.
+        if (!this.sceneReadOnly) this.broadcastScene("SCENE_INIT", this.getElements(), true);
         this.emit("new-user");
       });
 
       socket.on("room-user-change", (clients) => {
         this.collaborators = new Set(clients);
+        // read-only sockets have no SCENE_INIT to wait for — joining is enough
+        if (this.sceneReadOnly && !this.initialized) {
+          this.initialized = true;
+          resolve({ firstInRoom: false, sceneReadOnly: true });
+        }
         this.emit("room-user-change", clients);
       });
 
       socket.on("client-broadcast", async (encryptedData, iv) => {
+        if (this.sceneReadOnly) return; // primary socket handles scene traffic
         let data;
         try {
           data = await decryptPayload(this.roomKey, encryptedData, iv);

@@ -64,7 +64,8 @@ Each iteration is one **cycle**:
   deeper than 2 without a human turn in between.
 - **Never touch human ink**: no update/delete/move of elements whose author is "human".
 - **Layout blindness**: when spatial judgment matters (is this area crowded? what
-  does the user see?), render a snapshot: `node bin/render.js "<link>" /tmp/board.png`
-  and look at it.
+  does the user see?), render a snapshot: `node bin/wb.js render --out /tmp/board.png`
+  (~300ms via the host's warm renderer) and look at it. Looking is cheap — check
+  layout *before* placing ink, not after.
 - **Tempo**: the daemon already glances at everything instantly. Your ink rides
   the 10s beat; your *contributions* should feel considered, not rapid-fire.
