@@ -95,6 +95,12 @@ export async function runDaemon(opts) {
     const changes = [];
     for (const el of client.getElements()) {
       if (isMine(el)) continue;
+      // sibling agents' status cards are ledger, not content — auto-ack them
+      // so they never wake a waiting brain
+      if (el.customData?.wb?.kind === "status" || el.id === "wb-agents-corner") {
+        seen.set(el.id, el.version);
+        continue;
+      }
       const seenV = Number(seen.get(el.id) ?? -1);
       if ((el.version ?? 0) > seenV) changes.push(summarize(el));
     }
