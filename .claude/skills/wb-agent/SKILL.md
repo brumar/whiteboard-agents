@@ -30,7 +30,8 @@ inhabit them. If humans are in the room (`collaborators > 1`), wave:
 Each iteration is one **cycle**:
 
 1. **Wait** — `node bin/wb.js wait --agent <Name> --timeout 240`.
-   Blocks until the next 10s tick that has unseen changes (or times out).
+   Blocks until the board changes (resolves ~2s after a burst of edits settles;
+   a 10s sweep is the fallback) or times out.
 2. **Check stop conditions** — stop and exit the loop when:
    - `.wb/<roomId>/STOP` exists (`test -f .wb/*/STOP`), or
    - a board text says `@agents stop` / `@agents pause`, or

@@ -31,14 +31,18 @@ All commands below take `--agent <name>` when more than one agent runs.
 ```bash
 node bin/wb.js scene            # summaries: id, type, text, x/y/w/h, author, version
 node bin/wb.js scene --full     # raw excalidraw elements
+node bin/wb.js scene --fields id,text,author   # trim summaries to just these keys (cheap reads)
 node bin/wb.js diff             # changes by others not yet acked
-node bin/wb.js wait --timeout 240   # long-poll: returns at the next 10s tick with changes
+node bin/wb.js diff --since <sceneVersion>     # tiny answer when nothing changed since your cursor
+node bin/wb.js wait --timeout 240   # long-poll: resolves ~2s after the board changes (10s sweep as fallback)
 node bin/render.js "<link>" board.png   # render the board to PNG offline (see layout/what the user sees)
 ```
 
 - `author` is `"human"` for user ink, or an agent name (from `customData.wb.agent`).
 - Scene coordinates: y grows downward; the user typically starts around (0,0)–(1000,600).
-- `wait`/`diff` also return `recentPointers` — where humans moved their cursor lately.
+- Every read returns `sceneVersion` (sum of element versions) — pass it back as `--since` to resume cheaply.
+- `wait`/`diff`/`scene` also return `humans` (a human is in the room) and `presence` —
+  one `{name, x, y, ageSec}` entry per recently-seen collaborator cursor.
 
 ## Acting
 

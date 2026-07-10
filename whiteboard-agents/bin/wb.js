@@ -105,9 +105,9 @@ setup:
   wb health [--agent <name>]
 
 observing (all target one agent; --agent needed when several run):
-  wb scene [--full] [--deleted]               board contents (summaries by default)
-  wb diff                                     unseen changes by others
-  wb wait [--timeout <s>]                     block until changes at next 10s tick
+  wb scene [--full] [--deleted] [--fields id,text,author]   board contents (summaries by default)
+  wb diff [--since <sceneVersion>]            unseen changes by others
+  wb wait [--timeout <s>]                     block until the board changes (~2s debounce)
 
 acting:
   wb op --json '<op-or-{"ops":[...]}>'        high-level ops (see below); or pipe JSON on stdin
@@ -243,11 +243,14 @@ try {
       const q = new URLSearchParams();
       if (args.full) q.set("full", "1");
       if (args.deleted) q.set("deleted", "1");
+      if (args.fields) q.set("fields", args.fields);
       print(await call(resolveAgent(), "GET", `/scene?${q}`));
       break;
     }
     case "diff": {
-      print(await call(resolveAgent(), "GET", "/diff"));
+      const q = new URLSearchParams();
+      if (args.since !== undefined) q.set("since", String(args.since));
+      print(await call(resolveAgent(), "GET", `/diff?${q}`));
       break;
     }
     case "wait": {

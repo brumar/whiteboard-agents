@@ -6,7 +6,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { ExcalidrawClient } from "./client.js";
-import { loadScene, mergeSaveScene } from "./persistence.js";
+import { loadScene, mergeSaveScene, getSceneVersion } from "./persistence.js";
 import {
   makeText,
   makeShape,
@@ -22,8 +22,11 @@ import {
   measureText,
 } from "./elements.js";
 
-const POLL_MS = 10_000; // board polling cadence
+const POLL_MS = 10_000; // fallback sweep cadence (waits resolve from the debounce first)
+const DEBOUNCE_MS = Number(process.env.WB_DEBOUNCE_MS || 1500); // quiet window after a change
 const CURSOR_FPS_MS = 66; // ~15fps cursor animation frames
+const DRIFT_BASE_MS = Number(process.env.WB_DRIFT_MS || 3500); // idle-drift cadence
+const PRESENCE_TTL_MS = 60_000; // how long a peer sighting counts as "present"
 const CORNER = { x: -560, y: -460 }; // Agents' Corner (status cards)
 const NO_PERSIST = process.env.WB_NO_PERSIST === "1"; // tests: no Firestore traffic
 
@@ -56,7 +59,7 @@ export async function runDaemon(opts) {
     cursor: { x: CORNER.x + 60 + slot * 40, y: CORNER.y + 60 },
     animTarget: null,
     animQueue: [],
-    pointers: [], // recent human/agent pointer sightings
+    peers: new Map(), // username -> {x, y, ts} from MOUSE_LOCATION/IDLE_STATUS
     dirty: false,
     lastForeign: null, // last foreign element added (for auto-glance)
     startedAt: Date.now(),
@@ -124,8 +127,33 @@ export async function runDaemon(opts) {
   await client.connect();
   logEvent(`connected as ${client.socket?.id} (${client.collaborators.size} in room)`);
 
+  // ---- peer presence (P3) ---------------------------------------------------
+  // The socket list only carries ids; usernames arrive with MOUSE_LOCATION and
+  // IDLE_STATUS frames. A peer is human when its name lacks the agent prefix.
+  const isHumanName = (name) => !!name && !String(name).startsWith("🤖 ");
+  const prunePeers = () => {
+    for (const [name, p] of state.peers) {
+      if (Date.now() - p.ts > PRESENCE_TTL_MS) state.peers.delete(name);
+    }
+  };
+  const humansPresent = () => {
+    prunePeers();
+    return [...state.peers.keys()].some(isHumanName);
+  };
+  const sawPeer = (username, pointer) => {
+    if (!username) return;
+    const prev = state.peers.get(username) || {};
+    state.peers.set(username, {
+      x: pointer ? Math.round(pointer.x) : prev.x,
+      y: pointer ? Math.round(pointer.y) : prev.y,
+      ts: Date.now(),
+    });
+    if (isHumanName(username)) startAnimLoop(); // human arrived: presence matters again
+  };
+
   client.on("scene-changed", (els) => {
     state.dirty = true;
+    scheduleWake();
     const foreign = els.filter((e) => !isMine(e));
     if (foreign.length) {
       state.lastForeign = { els: foreign.map(summarize), ts: Date.now() };
@@ -136,18 +164,18 @@ export async function runDaemon(opts) {
       }
     }
   });
-  client.on("pointer", (p) => {
-    state.pointers.push({ username: p.username, ...p.pointer, ts: Date.now() });
-    if (state.pointers.length > 100) state.pointers.shift();
-  });
+  client.on("pointer", (p) => sawPeer(p.username, p.pointer));
+  client.on("idle-status", (s) => sawPeer(s.username, null));
   client.on("disconnect", (reason) => logEvent(`disconnected: ${reason} (auto-reconnects)`));
 
   // ---- cursor animation ----------------------------------------------------
   function enqueueMove(x, y, ms = 800) {
     state.animQueue.push({ x, y, ms });
+    if (state.animQueue.length > 50) state.animQueue.shift(); // never replay a backlog
   }
 
   let animFrame = null;
+  let lastSent = null;
   function startAnimLoop() {
     if (animFrame) return;
     let current = null;
@@ -165,15 +193,33 @@ export async function runDaemon(opts) {
         const wobble = Math.sin(t * Math.PI * 3) * 4 * (1 - t);
         state.cursor.x = current.from.x + (current.x - current.from.x) * e + wobble;
         state.cursor.y = current.from.y + (current.y - current.from.y) * e - wobble;
-        await client.sendCursor(state.cursor.x, state.cursor.y);
+        // frame-skip: sub-pixel deltas aren't worth an encrypted broadcast
+        if (
+          !lastSent ||
+          Math.abs(state.cursor.x - lastSent.x) + Math.abs(state.cursor.y - lastSent.y) >= 1
+        ) {
+          lastSent = { ...state.cursor };
+          await client.sendCursor(state.cursor.x, state.cursor.y);
+        }
         if (t >= 1) current = null;
       }
     }, CURSOR_FPS_MS);
   }
+  function stopAnimLoop() {
+    if (!animFrame) return;
+    clearInterval(animFrame);
+    animFrame = null;
+  }
   startAnimLoop();
 
-  // idle drift: tiny wanderings so the cursor feels alive
+  // idle drift: tiny wanderings so the cursor feels alive — only performed
+  // for humans; an empty room gets no presence traffic (P3)
   setInterval(() => {
+    if (!humansPresent()) {
+      stopAnimLoop(); // also parks the ~15fps interval until someone shows up
+      return;
+    }
+    startAnimLoop();
     if (state.animQueue.length === 0) {
       enqueueMove(
         state.cursor.x + (Math.random() - 0.5) * 30,
@@ -181,9 +227,9 @@ export async function runDaemon(opts) {
         1200,
       );
     }
-  }, 3500 + Math.random() * 2500);
+  }, DRIFT_BASE_MS + Math.random() * DRIFT_BASE_MS * 0.7);
 
-  // stay "active" in the collaborators list
+  // stay "active" in the collaborators list (cheap keepalive, always on)
   setInterval(() => client.sendIdleStatus("active"), 20_000);
 
   // ---- persistence ---------------------------------------------------------
@@ -496,9 +542,10 @@ export async function runDaemon(opts) {
     await new Promise((r) => setTimeout(r, ms + 150));
   }
 
-  // ---- 10s poll tick + long-poll waiters ------------------------------------
+  // ---- waiters: debounced event wake (P2a) + fallback sweep ------------------
   const waiters = [];
-  setInterval(() => {
+  const flushWaiters = () => {
+    if (!waiters.length) return;
     const diff = computeDiff();
     if (!diff.length) return;
     while (waiters.length) {
@@ -506,14 +553,35 @@ export async function runDaemon(opts) {
       clearTimeout(w.timer);
       w.respond({ changes: diff, ...contextInfo() });
     }
-  }, POLL_MS);
+  };
+  // quiet-window debounce: a burst of edits resolves waiters once, ~DEBOUNCE_MS
+  // after the last change instead of at the next 10s tick
+  let wakeTimer = null;
+  function scheduleWake() {
+    if (wakeTimer) clearTimeout(wakeTimer);
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null;
+      flushWaiters();
+    }, DEBOUNCE_MS);
+  }
+  setInterval(flushWaiters, POLL_MS); // fallback sweep (waiters resolve at most once)
 
-  const contextInfo = () => ({
-    collaborators: client.collaborators.size,
-    recentPointers: state.pointers.filter((p) => Date.now() - p.ts < 30_000).slice(-10),
-    agent,
-    cursor: { x: Math.round(state.cursor.x), y: Math.round(state.cursor.y) },
-  });
+  const contextInfo = () => {
+    prunePeers();
+    return {
+      agent,
+      collaborators: client.collaborators.size,
+      humans: humansPresent(),
+      // one line per live peer — replaces the old recentPointers array
+      presence: [...state.peers.entries()].map(([name, p]) => ({
+        name,
+        ...(p.x != null ? { x: p.x, y: p.y } : {}),
+        ageSec: Math.round((Date.now() - p.ts) / 1000),
+      })),
+      cursor: { x: Math.round(state.cursor.x), y: Math.round(state.cursor.y) },
+      sceneVersion: getSceneVersion(client.getElements()),
+    };
+  };
 
   // ---- HTTP API --------------------------------------------------------------
   const server = http.createServer(async (req, res) => {
@@ -537,13 +605,25 @@ export async function runDaemon(opts) {
       if (req.method === "GET" && url.pathname === "/scene") {
         const full = url.searchParams.get("full") === "1";
         const els = client.getElements({ includeDeleted: url.searchParams.get("deleted") === "1" });
-        return respond(200, {
-          elements: full ? els : els.map(summarize),
-          ...contextInfo(),
-        });
+        let elements = full ? els : els.map(summarize);
+        // ?fields=id,text,author — projection applied after summarize (P5)
+        const fields = url.searchParams.get("fields");
+        if (fields && !full) {
+          const keep = fields.split(",").map((f) => f.trim()).filter(Boolean);
+          elements = elements.map((e) =>
+            Object.fromEntries(keep.filter((k) => k in e).map((k) => [k, e[k]])),
+          );
+        }
+        return respond(200, { elements, ...contextInfo() });
       }
       if (req.method === "GET" && url.pathname === "/diff") {
-        return respond(200, { changes: computeDiff(), ...contextInfo() });
+        const ctx = contextInfo();
+        // ?since=<sceneVersion> — cheap resume: nothing changed, answer tiny
+        const since = url.searchParams.get("since");
+        if (since !== null && Number(since) === ctx.sceneVersion) {
+          return respond(200, { changes: [], ...ctx });
+        }
+        return respond(200, { changes: computeDiff(), ...ctx });
       }
       if (req.method === "GET" && url.pathname === "/wait") {
         const timeout = Math.min(300, Number(url.searchParams.get("timeout") || 60)) * 1000;
@@ -577,10 +657,12 @@ export async function runDaemon(opts) {
             x = t.x + t.w / 2;
             y = t.y + t.h / 2;
           }
+          startAnimLoop(); // explicit presence request overrides the idle gate
           enqueueMove(x, y, ms);
           return respond(200, { ok: true });
         }
         if (url.pathname === "/gesture") {
+          startAnimLoop();
           const t = body.target ? bbox(getEl(body.target)) : { x: body.x, y: body.y, w: 0, h: 0 };
           if (!t) return respond(404, { error: "target not found" });
           const cx = t.x + t.w / 2;
