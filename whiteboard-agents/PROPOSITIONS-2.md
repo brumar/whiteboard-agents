@@ -8,6 +8,10 @@ suite. This second round comes from re-reading the implementation as it stands
 the `wb-*` skills) and asking: where does it still lose data, trust, or
 opportunities?
 
+> **Status (2026-07-11):** 4, 7 and 10 are accepted (10 with a *light bias
+> only* constraint) — implementation plan in PREPLAN-2.md. Firestore
+> persistence is confirmed kept; 1–2 stay relevant but unscheduled.
+
 ## Robustness
 
 ### 1. Resync the scene after a disconnection
