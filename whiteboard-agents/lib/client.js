@@ -154,9 +154,12 @@ export class ExcalidrawClient extends EventEmitter {
   }
 
   async _broadcast(data, volatile = false) {
-    if (!this.socket?.connected) return;
+    const socket = this.socket;
+    if (!socket?.connected) return;
     const { encryptedBuffer, iv } = await encryptPayload(this.roomKey, JSON.stringify(data));
-    this.socket.emit(
+    // close() may have run while we were encrypting
+    if (this.socket !== socket || !socket.connected) return;
+    socket.emit(
       volatile ? WS_EVENTS.SERVER_VOLATILE : WS_EVENTS.SERVER,
       this.roomId,
       encryptedBuffer,
