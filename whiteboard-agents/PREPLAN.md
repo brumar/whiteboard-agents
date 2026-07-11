@@ -8,6 +8,10 @@
 > ~360 ms), tombstone horizon 24 h without an offline-human guard. Spike A
 > (live excalidraw.com multi-socket check) could not be run from the dev
 > sandbox — the relay-fixture models it; verify once on a live room.
+> **Update 2026-07-11:** the live check now passes from the remote sandbox
+> (relay + Firestore + ops + warm render, single agent) — see the spike log
+> in PREPLAN-2.md. Multi-cursor presence in the excalidraw.com UI remains
+> visually confirmed only from the 2026-07-10 four-daemon session.
 
 Working notes for turning the 10 propositions into changes. Ordered by
 dependency and risk, not by proposition number: the safety net comes first,
