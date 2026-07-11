@@ -33,14 +33,19 @@ export async function encryptPayload(roomKey, data) {
   return { encryptedBuffer, iv };
 }
 
-export async function decryptPayload(roomKey, encrypted, iv) {
+export async function decryptBytes(roomKey, encrypted, iv) {
   const key = await importKey(roomKey, "decrypt");
   const buf = await webcrypto.subtle.decrypt(
     { name: "AES-GCM", iv: toUint8(iv) },
     key,
     toUint8(encrypted),
   );
-  return JSON.parse(new TextDecoder("utf-8").decode(new Uint8Array(buf)));
+  return new Uint8Array(buf);
+}
+
+export async function decryptPayload(roomKey, encrypted, iv) {
+  const bytes = await decryptBytes(roomKey, encrypted, iv);
+  return JSON.parse(new TextDecoder("utf-8").decode(bytes));
 }
 
 function toUint8(x) {

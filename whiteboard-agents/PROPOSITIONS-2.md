@@ -11,6 +11,14 @@ opportunities?
 > **Status (2026-07-11):** 4, 7 and 10 are accepted (10 with a *light bias
 > only* constraint) — implementation plan in PREPLAN-2.md. Firestore
 > persistence is confirmed kept; 1–2 stay relevant but unscheduled.
+>
+> **Implemented (2026-07-11, same day):** 7 (WB_TARGET/WB_DIRECTIVE routing,
+> directive spawns skip the cooldown), 10 (humanFocus() bias on anchor-less
+> placement only, `focus` in context payloads), 4 (`lib/files.js` +
+> `GET /file` + `wb file`, prefetch on sight, images painted by the warm
+> renderer). Offline suite covers all three; the file-envelope format is
+> pinned from upstream 0.18.1 source, with a live paste-and-read check still
+> to be done next time a human is in a room.
 
 ## Robustness
 

@@ -43,12 +43,15 @@ node bin/wb.js diff             # changes by others not yet acked
 node bin/wb.js diff --since <sceneVersion>     # tiny answer when nothing changed since your cursor
 node bin/wb.js wait --timeout 240   # long-poll: resolves ~2s after the board changes (10s sweep as fallback)
 node bin/wb.js render --out board.png [--crop content|frame:<id>]   # PNG via the host's warm renderer (~300ms)
+node bin/wb.js file --id <fileId> [--out img.png]   # fetch+decrypt a pasted image (see hasImage below)
 node bin/wb.js view                 # URL of the live read-only viewer (SSE: scene + cursors)
 node bin/wb.js journal [--tail 50]  # replayable session journal (ops/acks/directives/joins, jsonl)
 node bin/render.js "<link>" board.png   # offline fallback when no host runs (boots its own Chromium)
 ```
 
 - `author` is `"human"` for user ink, or an agent name (from `customData.wb.agent`).
+- Image elements carry `hasImage: true` + `fileId` in summaries. `wb file --id <fileId>`
+  saves the decrypted bytes; `wb render` paints them into the board PNG too.
 - Scene coordinates: y grows downward; the user typically starts around (0,0)–(1000,600).
 - Every read returns `sceneVersion` (sum of element versions) — pass it back as `--since` to resume cheaply.
 - `wait`/`diff`/`scene` also return `humans` (a human is in the room) and `presence` —

@@ -35,6 +35,22 @@ Practical notes for future spikes: the renderer needs the pre-installed
 Chromium (`WB_CHROMIUM` honored, default `/opt/pw-browsers/chromium`);
 websockets pass through the agent proxy without any client change.
 
+**Spike C1 outcome (2026-07-11):** ran *partially* live. The compressData
+envelope was pinned from the shipped sourcemap of the installed
+`@excalidraw/excalidraw` 0.18.1 (`data/encode.ts`, verbatim) rather than from
+a live paste — the byte layout is committed as `test/fixtures/room-file.bin`
+and asserted offline. Against production: Firebase Storage read path + URL
+shape verified (clean JSON 404 for a missing fileId in the known live room,
+through the proxy). The full paste-and-read-back script exists as
+`test/live-spike-c1.mjs` (drives excalidraw.com in Chromium, drops a PNG,
+reads the blob back with lib/files.js) but could not run from this sandbox:
+Chromium gets `ERR_CONNECTION_RESET` for **all** external HTTPS through the
+agent proxy (curl/Node fetch work; proxy logs only show Chromium's own
+`clients2.google.com` background probes being refused). Run it from a less
+restricted machine, or simply paste an image next time a human is in a live
+room and `wb file` it. `node:zlib` inflate is wire-compatible with pako
+(both zlib streams) — the vendoring fallback was not needed.
+
 ## The P10 constraint: light bias
 
 Per the review of PROPOSITIONS-2.md: placement should acquire a *light* bias

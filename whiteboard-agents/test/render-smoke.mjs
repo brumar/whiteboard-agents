@@ -1,14 +1,17 @@
 // Render smoke test (not part of `npm test` — needs Chromium):
-// host on a local relay fixture -> a few ops -> GET /render -> assert a
-// non-blank PNG whose element count matches the live scene.
+// host on a local relay fixture -> a few ops (including an image element
+// backed by a storage stub) -> GET /render -> assert a non-blank PNG whose
+// element count matches the live scene.
 // Run: npm run test:render
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { webcrypto } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { startRelay } from "./relay-fixture.js";
+import { encodeFileBlob } from "../lib/files.js";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WB = path.join(PKG_ROOT, "bin", "wb.js");
@@ -18,11 +21,34 @@ const ROOM_ID = "render-smoke-room";
 const ROOM_KEY = Buffer.from(webcrypto.getRandomValues(new Uint8Array(16))).toString("base64url");
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-render-"));
 
+// storage stub serving one image blob encrypted with this room's key
+const FIXTURE = JSON.parse(
+  fs.readFileSync(path.join(PKG_ROOT, "test", "fixtures", "room-file.json"), "utf8"),
+);
+const FILE_ID = "rendersmokefile0000000000000000000000000";
+const blob = await encodeFileBlob(ROOM_KEY, {
+  id: FILE_ID,
+  mimeType: "image/png",
+  bytes: Buffer.from(FIXTURE.pngBase64, "base64"),
+});
+const storage = http.createServer((req, res) => {
+  if (decodeURIComponent(req.url).includes(FILE_ID)) return res.end(Buffer.from(blob));
+  res.statusCode = 404;
+  res.end("{}");
+});
+await new Promise((r) => storage.listen(0, "127.0.0.1", r));
+
 const hostProc = spawn(
   process.execPath,
   [WB, "host", "--room", `${ROOM_ID},${ROOM_KEY}`, "--agents-json", JSON.stringify([{ name: "Render" }])],
   {
-    env: { ...process.env, WB_WS_SERVER: relay.url, WB_STATE_DIR: stateDir, WB_NO_PERSIST: "1" },
+    env: {
+      ...process.env,
+      WB_WS_SERVER: relay.url,
+      WB_STATE_DIR: stateDir,
+      WB_NO_PERSIST: "1",
+      WB_STORAGE_BASE: `http://127.0.0.1:${storage.address().port}`,
+    },
     stdio: ["ignore", "inherit", "inherit"],
   },
 );
@@ -60,6 +86,42 @@ await api("POST", "/op", {
     { op: "note", text: "render smoke", x: 100, y: 100 },
     { op: "shape", shape: "ellipse", x: 400, y: 120, w: 120, h: 80 },
     { op: "text", text: "hello", x: 300, y: 300 },
+    {
+      op: "raw",
+      elements: [
+        {
+          id: "smoke-img",
+          type: "image",
+          x: 120,
+          y: 260,
+          width: 160,
+          height: 160,
+          angle: 0,
+          strokeColor: "transparent",
+          backgroundColor: "transparent",
+          fillStyle: "solid",
+          strokeWidth: 1,
+          strokeStyle: "solid",
+          roughness: 1,
+          opacity: 100,
+          groupIds: [],
+          frameId: null,
+          roundness: null,
+          seed: 7,
+          version: 1,
+          versionNonce: 7,
+          isDeleted: false,
+          boundElements: null,
+          updated: Date.now(),
+          link: null,
+          locked: false,
+          fileId: FILE_ID,
+          status: "saved",
+          scale: [1, 1],
+          crop: null,
+        },
+      ],
+    },
   ],
 });
 

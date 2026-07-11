@@ -81,7 +81,7 @@ export async function createRenderer({ viewport = { width: 1600, height: 1000 } 
 
   return {
     port,
-    async render(elements, { crop = "content", settleMs = 300 } = {}) {
+    async render(elements, { crop = "content", settleMs = 300, files = [] } = {}) {
       currentElements = elements;
       let focusIds = null;
       if (crop.startsWith("frame:")) {
@@ -92,13 +92,14 @@ export async function createRenderer({ viewport = { width: 1600, height: 1000 } 
         if (!focusIds.length) throw Object.assign(new Error(`frame not found: ${frameId}`), { status: 404 });
       }
       const rendered = await page.evaluate(
-        ([els, ids]) => window.__setScene(els, ids),
-        [elements, focusIds],
+        ([els, ids, binaryFiles]) => window.__setScene(els, ids, binaryFiles),
+        [elements, focusIds, files],
       );
       await page.waitForTimeout(settleMs);
       const png = await page.screenshot();
       const restoreError = await page.evaluate(() => window.__restoreError);
-      return { png, rendered, restoreError, pageErrors: pageErrors.slice(0, 3) };
+      const filesError = await page.evaluate(() => window.__filesError);
+      return { png, rendered, restoreError, filesError, pageErrors: pageErrors.slice(0, 3) };
     },
     async close() {
       await browser.close().catch(() => {});

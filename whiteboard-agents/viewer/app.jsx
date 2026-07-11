@@ -35,8 +35,9 @@ async function main() {
   );
 
   // Replace the scene in place (warm renderer path). `focusIds` crops the
-  // viewport to those elements (e.g. a frame and its children).
-  window.__setScene = (rawElements, focusIds) => {
+  // viewport to those elements (e.g. a frame and its children); `files` are
+  // BinaryFileData ({id, mimeType, dataURL, created}) for image elements.
+  window.__setScene = (rawElements, focusIds, files) => {
     let restored;
     try {
       restored = restoreElements(rawElements, null);
@@ -44,6 +45,14 @@ async function main() {
     } catch (err) {
       window.__restoreError = String(err);
       return -1;
+    }
+    if (files && files.length) {
+      try {
+        api.addFiles(files);
+        window.__filesError = null;
+      } catch (err) {
+        window.__filesError = String(err);
+      }
     }
     api.updateScene({ elements: restored });
     const focus = focusIds

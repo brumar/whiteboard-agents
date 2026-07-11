@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { parseRoomLink } from "../lib/crypto.js";
 import { loadScene } from "../lib/persistence.js";
 import { createRenderer } from "../lib/render.js";
+import { createFileStore } from "../lib/files.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(__dirname, "..");
@@ -74,12 +75,34 @@ if (!elements) {
   console.error(`scene from firestore: ${elements.length} elements`);
 }
 
-// 3. one-shot render through the shared renderer
-const renderer = await createRenderer();
+// 3. image files: the room's disk cache first, storage as fallback
 const live = elements.filter((e) => !e.isDeleted);
+const fileStore = createFileStore({ roomId, roomKey, dir: path.join(roomDir, "files") });
+const files = [];
+const seenFileIds = new Set();
+for (const el of live) {
+  if (el.type !== "image" || !el.fileId || seenFileIds.has(el.fileId)) continue;
+  seenFileIds.add(el.fileId);
+  try {
+    const f = await fileStore.load(el.fileId);
+    files.push({
+      id: el.fileId,
+      mimeType: f.mimeType,
+      dataURL: f.dataURL,
+      created: f.metadata?.created || Date.now(),
+    });
+  } catch (err) {
+    console.error(`file ${el.fileId}: ${err.message} (placeholder)`);
+  }
+}
+if (files.length) console.error(`loaded ${files.length} image file(s)`);
+
+// 4. one-shot render through the shared renderer
+const renderer = await createRenderer();
 const { png, rendered, restoreError, pageErrors } = await renderer.render(live, {
   crop: args.crop || "content",
   settleMs: 1200, // cold render: fonts/roughjs settle
+  files,
 });
 fs.writeFileSync(out, png);
 await renderer.close();

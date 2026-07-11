@@ -10,6 +10,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { ExcalidrawClient } from "./client.js";
 import { loadScene, mergeSaveScene, getSceneVersion } from "./persistence.js";
+import { createFileStore } from "./files.js";
 import {
   makeText,
   makeShape,
@@ -89,6 +90,37 @@ export async function runRoomHost(opts) {
     } catch {}
   };
 
+  // ---- room files (P4): pasted images, decrypted on demand ------------------
+  const fileStore = createFileStore({ roomId, roomKey, dir: path.join(dir, "files") });
+  const prefetchFiles = (els) => {
+    for (const el of els) {
+      if (el.type !== "image" || !el.fileId || el.isDeleted) continue;
+      fileStore.load(el.fileId).catch((err) => {
+        journal({ agent: "host", event: "file-error", ids: [el.id], summary: redact(err.message) });
+        logEvent(`file prefetch failed (${el.fileId}): ${err.message}`);
+      });
+    }
+  };
+  // BinaryFiles for the renderer, for every visible image element we can load
+  async function collectRenderFiles(els) {
+    const out = [];
+    const seen = new Set();
+    for (const el of els) {
+      if (el.type !== "image" || !el.fileId || seen.has(el.fileId)) continue;
+      seen.add(el.fileId);
+      try {
+        const f = await fileStore.load(el.fileId);
+        out.push({
+          id: el.fileId,
+          mimeType: f.mimeType,
+          dataURL: f.dataURL,
+          created: f.metadata?.created || Date.now(),
+        });
+      } catch {} // renderer keeps its placeholder for this one
+    }
+    return out;
+  }
+
   // ---- authorship & summaries ----------------------------------------------
   const authorOf = (el) => el?.customData?.wb?.agent || "human";
 
@@ -103,6 +135,8 @@ export async function runRoomHost(opts) {
     version: el.version,
     deleted: !!el.isDeleted,
     ...(el.text != null ? { text: el.originalText ?? el.text } : {}),
+    // the one summary a brain must not skim past: there are pixels to look at
+    ...(el.type === "image" ? { hasImage: true, ...(el.fileId ? { fileId: el.fileId } : {}) } : {}),
     ...(el.name != null ? { name: el.name } : {}),
     ...(el.containerId ? { containerId: el.containerId } : {}),
     ...(el.customData?.wb?.kind ? { kind: el.customData.wb.kind } : {}),
@@ -301,6 +335,7 @@ export async function runRoomHost(opts) {
           state.pendingSpawn = { reason: "human-change", targets: new Set(), directive: null };
         }
       }
+      prefetchFiles(els); // background: image blobs ready before the first look
       scheduleWake();
       pushSceneToViewers();
       if (state.paused) return; // parked: no glances while paused
@@ -1121,9 +1156,18 @@ export async function runRoomHost(opts) {
       if (req.method === "GET" && url.pathname === "/render") {
         const r = await getRenderer();
         const crop = url.searchParams.get("crop") || "content";
-        const { png, rendered } = await r.render(liveElements(), { crop });
+        const els = liveElements();
+        const files = await collectRenderFiles(els);
+        const { png, rendered } = await r.render(els, { crop, files });
         res.writeHead(200, { "content-type": "image/png", "x-rendered-elements": String(rendered) });
         return res.end(png);
+      }
+      if (req.method === "GET" && url.pathname === "/file") {
+        const id = url.searchParams.get("id");
+        if (!id) return respond(400, { error: "GET /file requires ?id=<fileId>" });
+        const f = await fileStore.load(id); // 404s with a clear error via the catch below
+        res.writeHead(200, { "content-type": f.mimeType || "application/octet-stream" });
+        return res.end(Buffer.from(f.bytes));
       }
       if (req.method === "GET" && url.pathname === "/view") {
         await getViewerAssets();

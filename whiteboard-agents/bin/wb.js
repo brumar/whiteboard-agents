@@ -249,6 +249,8 @@ observing (all target one agent; --agent needed when several run):
   wb diff [--since <sceneVersion>]            unseen changes by others
   wb wait [--timeout <s>]                     block until the board changes (~2s debounce)
   wb render [--out board.png] [--crop content|frame:<id>]   PNG through the host's warm renderer
+  wb file --id <fileId> [--out <path>]        fetch+decrypt a board image (summaries flag them
+                                              with hasImage/fileId — go look before replying)
   wb view                                     print the live read-only viewer URL (/view, SSE-fed)
   wb journal [--tail <n>]                     the room's replayable session journal (jsonl)
 
@@ -467,6 +469,35 @@ try {
       }
       fs.writeFileSync(outPath, Buffer.from(await res.arrayBuffer()));
       console.error(`rendered ${res.headers.get("x-rendered-elements")} elements`);
+      console.log(outPath);
+      break;
+    }
+
+    case "file": {
+      if (!args.id) die("file requires --id <fileId>");
+      const { info } = resolveTarget({ agentRequired: false });
+      const res = await fetch(
+        `http://127.0.0.1:${info.port}/file?id=${encodeURIComponent(args.id)}`,
+      );
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          msg = (await res.json()).error || msg;
+        } catch {}
+        die(`file failed: ${msg}`);
+      }
+      const mime = res.headers.get("content-type") || "";
+      const ext =
+        {
+          "image/png": "png",
+          "image/jpeg": "jpg",
+          "image/svg+xml": "svg",
+          "image/gif": "gif",
+          "image/webp": "webp",
+        }[mime] || "bin";
+      const outPath = args.out || `${args.id}.${ext}`;
+      fs.writeFileSync(outPath, Buffer.from(await res.arrayBuffer()));
+      console.error(`${mime || "unknown type"}, ${fs.statSync(outPath).size} bytes`);
       console.log(outPath);
       break;
     }

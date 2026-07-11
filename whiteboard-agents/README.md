@@ -31,9 +31,12 @@ room host ── 🤖 Echo   ─────┤        ▲
     persistence writer with tombstone compaction, warm renderer, localhost HTTP
     control API (`daemon.js` is a single-agent compat wrapper)
   - `render.js` — warm headless-Chromium renderer through the real excalidraw
-    renderer (~350ms per look once warm)
+    renderer (~350ms per look once warm), pasted images included
+  - `files.js` — room files: fetch + decrypt the binaries excalidraw stores per
+    room in Firebase Storage (compressData envelope, format pinned from
+    upstream), in-memory LRU + on-disk cache
 - **`bin/wb.js`** — CLI over the room host: `start/up/stop`, `scene/diff/wait`,
-  `render`, `note/text/arrow/react/sketch/status/cursor/gesture/ack/save`
+  `render`, `file`, `note/text/arrow/react/sketch/status/cursor/gesture/ack/save`
 - **`bin/render.js`** — one-shot offline render to PNG (prefers a live host's
   warm renderer; also great for CI)
 - **`agents/personas.json`** — the cast: Echo (host/synthesizer), Sprout
@@ -64,6 +67,7 @@ node bin/wb.js note  --agent Echo --text "hello from the terminal"
 node bin/wb.js react --agent Echo --target <elementId> --emoji "💡"
 node bin/wb.js wait  --agent Echo --timeout 60    # block until board activity
 node bin/wb.js render --out board.png             # see the board (~350ms warm)
+node bin/wb.js file --id <fileId> --out img.png   # a pasted image, decrypted (hasImage in summaries)
 node bin/wb.js stop --agent Echo                  # detach one agent
 node bin/wb.js stop --all                         # stop the room host
 ```

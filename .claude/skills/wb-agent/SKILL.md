@@ -44,20 +44,25 @@ Each iteration is one **cycle**:
    do what it asks). `verb: "cleanup"` = delete your own stale
    reactions/seeds/acks. stop/pause/resume never reach you — the host handles
    those itself.
-4. **Acknowledge** (only if human changes appeared) — this is non-negotiable:
+4. **Look at images** — a diff entry with `hasImage: true` is usually the most
+   information-dense thing on the board (a screenshot, a diagram, a photo).
+   Fetch it and actually look before responding to it:
+   `node bin/wb.js file --id <fileId> --out /tmp/img.png`, then Read the image.
+   Never react to an image you haven't seen.
+5. **Acknowledge** (only if human changes appeared) — this is non-negotiable:
    `ack --glance` everything; for the 1–2 most significant human elements add a
    visible receipt: `react` (👀 ✓ 💡 ⭐ ❓ ⚠), `sketch --kind underline|circle`, or
    a tiny ack note. Match the emoji to an actual stance.
-5. **Contribute** (≤1 move per cycle, and only when it genuinely helps) —
+6. **Contribute** (≤1 move per cycle, and only when it genuinely helps) —
    pick from *your* persona's moves. Place ink near what it responds to
    (`--near <id>`), let auto-placement avoid collisions. Arrows link your
    contribution back to what inspired it. If unsure, skip — silence is a move.
    If the board stayed quiet for many cycles and is sparse, you may plant one seed question.
-6. **Sign the ledger** — `status --text "<what you saw> · <what you did>"`, e.g.
+7. **Sign the ledger** — `status --text "<what you saw> · <what you did>"`, e.g.
    "saw 3 notes on pricing · linked two, asked about churn". This is your
    acknowledgment of work: the human can always read the 🤖 corner to know
    what each agent did last.
-7. Loop back to 1. Do not end your turn between cycles; the `wait` call is your clock.
+8. Loop back to 1. Do not end your turn between cycles; the `wait` call is your clock.
 
 ## Judgment calls
 
