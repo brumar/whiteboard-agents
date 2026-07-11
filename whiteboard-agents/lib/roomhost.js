@@ -32,6 +32,7 @@ const DEBOUNCE_MS = Number(process.env.WB_DEBOUNCE_MS || 1500); // quiet window 
 const CURSOR_FPS_MS = 66; // ~15fps cursor animation frames
 const DRIFT_BASE_MS = Number(process.env.WB_DRIFT_MS || 3500); // idle-drift cadence
 const PRESENCE_TTL_MS = 60_000; // how long a peer sighting counts as "present"
+const FOCUS_TTL_MS = Number(process.env.WB_FOCUS_TTL_MS || 60_000); // pointer freshness for placement bias
 const TOMBSTONE_MS = Number(process.env.WB_TOMBSTONE_MS || 24 * 3600 * 1000); // compaction horizon
 const CORNER = { x: -560, y: -460 }; // Agents' Corner (status cards)
 const NO_PERSIST = process.env.WB_NO_PERSIST === "1"; // tests: no Firestore traffic
@@ -152,9 +153,25 @@ export async function runRoomHost(opts) {
       x: pointer ? Math.round(pointer.x) : prev.x,
       y: pointer ? Math.round(pointer.y) : prev.y,
       ts: Date.now(),
+      ...(pointer ? { pointerTs: Date.now() } : { pointerTs: prev.pointerTs }),
     });
     if (isHumanName(username)) startAnimLoop();
   };
+
+  // Where the human is looking, best-effort: the freshest human pointer
+  // younger than FOCUS_TTL_MS. Presence outlives focus (PRESENCE_TTL_MS is
+  // about being in the room; this is about attention right now).
+  function humanFocus() {
+    let best = null;
+    for (const [name, p] of state.peers) {
+      if (!isHumanName(name) || p.x == null || !p.pointerTs) continue;
+      if (Date.now() - p.pointerTs > FOCUS_TTL_MS) continue;
+      if (!best || p.pointerTs > best.pointerTs) best = p;
+    }
+    return best
+      ? { x: best.x, y: best.y, ageSec: Math.round((Date.now() - best.pointerTs) / 1000) }
+      : null;
+  }
 
   // ---- board directives (P7) -------------------------------------------------
   // Human text starting with @agents or @<AgentName> steers the room from the
@@ -524,7 +541,15 @@ export async function runRoomHost(opts) {
 
   function placeNear(targetId, w, h) {
     const anchor = targetId ? bbox(getEl(targetId)) : null;
-    const start = anchor ? { x: anchor.x + anchor.w + 40, y: anchor.y } : contentEdge(w, h);
+    let start;
+    if (anchor) {
+      start = { x: anchor.x + anchor.w + 40, y: anchor.y };
+    } else {
+      // light bias (P10): anchor-less ink starts its free-space search near
+      // where the human last pointed; explicit anchors/coords are never altered
+      const focus = humanFocus();
+      start = focus ? { x: focus.x + 60, y: focus.y + 40 } : contentEdge(w, h);
+    }
     return findFreeSpace(liveElements(), { x: start.x, y: start.y, w, h });
   }
 
@@ -885,10 +910,12 @@ export async function runRoomHost(opts) {
 
   const contextInfo = (agent) => {
     prunePeers();
+    const focus = humanFocus();
     return {
       agent: agent?.name,
       collaborators: (primary || agent)?.client.collaborators.size ?? 0,
       humans: humansPresent(),
+      ...(focus ? { focus } : {}),
       presence: [...state.peers.entries()].map(([name, p]) => ({
         name,
         ...(p.x != null ? { x: p.x, y: p.y } : {}),

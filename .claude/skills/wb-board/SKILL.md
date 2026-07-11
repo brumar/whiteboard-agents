@@ -53,6 +53,10 @@ node bin/render.js "<link>" board.png   # offline fallback when no host runs (bo
 - Every read returns `sceneVersion` (sum of element versions) — pass it back as `--since` to resume cheaply.
 - `wait`/`diff`/`scene` also return `humans` (a human is in the room) and `presence` —
   one `{name, x, y, ageSec}` entry per recently-seen collaborator cursor.
+- When a human pointer moved in the last 60 s (`WB_FOCUS_TTL_MS`), responses also
+  carry `focus: {x, y, ageSec}` — where the human is looking. Anchor-less
+  `note`/`text`/`shape` ops start their free-space search near `focus`;
+  `--near`/`--x/--y` are never altered.
 
 ## Acting
 

@@ -70,5 +70,10 @@ Each iteration is one **cycle**:
   does the user see?), render a snapshot: `node bin/wb.js render --out /tmp/board.png`
   (~300ms via the host's warm renderer) and look at it. Looking is cheap — check
   layout *before* placing ink, not after.
+- **Attention**: responses carry `focus: {x, y, ageSec}` when a human pointed at
+  the board recently — where they are looking. Prefer `--near <id>` as always;
+  when you write anchor-less ink it now lands near `focus` automatically. Use
+  `focus` to *decide*, too: is the human even looking at the area you're about
+  to annotate, or would a note there go unseen?
 - **Tempo**: the daemon already glances at everything instantly. Your ink rides
   the 10s beat; your *contributions* should feel considered, not rapid-fire.
