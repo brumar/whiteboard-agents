@@ -78,7 +78,7 @@ test.before(async () => {
       "--agents-json",
       JSON.stringify([{ name: "Alpha", slot: 0 }, { name: "Beta", slot: 1 }]),
       "--on-change",
-      `node -e "require('fs').appendFileSync(process.env.MARK_FILE, process.env.WB_REASON + '\\n')"`,
+      `node -e "require('fs').appendFileSync(process.env.MARK_FILE, JSON.stringify({r:process.env.WB_REASON,t:process.env.WB_TARGET,d:process.env.WB_DIRECTIVE}) + '\\n')"`,
     ],
     {
       env: {
@@ -215,4 +215,114 @@ test("--on-change fires once per burst, only when nobody is long-polling", async
   assert.ok(waited.changes.length >= 1, "waiter got the change");
   await new Promise((r) => setTimeout(r, 1500));
   assert.equal(marks().length, before + 1, "no spawn while a brain was long-polling");
+});
+
+test("directive spawns carry WB_TARGET/WB_DIRECTIVE; plain ink spawns unrouted", async () => {
+  await new Promise((r) => setTimeout(r, 1200)); // let this host's 1s cooldown lapse
+  const before = marks().length;
+  await humanText("@Alpha poke holes in the pricing", 700, 100);
+  assert.ok(await until(() => marks().length === before + 1, 5000), "directive spawned a brain");
+  const routed = JSON.parse(marks()[before]);
+  assert.equal(routed.r, "directive");
+  assert.equal(routed.t, "Alpha");
+  assert.match(routed.d, /poke holes in the pricing/);
+
+  await new Promise((r) => setTimeout(r, 1200));
+  await humanText("just a plain note", 700, 200);
+  assert.ok(await until(() => marks().length === before + 2, 5000), "plain ink spawned a brain");
+  const unrouted = JSON.parse(marks()[before + 1]);
+  assert.equal(unrouted.r, "human-change");
+  assert.equal(unrouted.t, "", "no target for plain human changes");
+  assert.equal(unrouted.d, "");
+
+  await new Promise((r) => setTimeout(r, 1200));
+  await humanText("@agents where does this fall apart?", 700, 300);
+  assert.ok(await until(() => marks().length === before + 3, 5000), "@agents spawned a brain");
+  const all = JSON.parse(marks()[before + 2]);
+  assert.equal(all.r, "directive");
+  assert.deepEqual(all.t.split(",").sort(), ["Alpha", "Beta"], "@agents targets the whole cast");
+});
+
+test("directive spawns bypass the cooldown; human-change spawns respect it", async (t) => {
+  // separate host with a long cooldown so bypass vs respect is observable
+  const room2 = "phase3-cooldown-room";
+  const markFile2 = path.join(stateDir, "cooldown-marks.txt");
+  const marks2 = () =>
+    fs.existsSync(markFile2) ? fs.readFileSync(markFile2, "utf8").split("\n").filter(Boolean) : [];
+  const host2 = spawn(
+    process.execPath,
+    [
+      WB,
+      "host",
+      "--room",
+      `${room2},${ROOM_KEY}`,
+      "--agents-json",
+      JSON.stringify([{ name: "Solo", slot: 0 }]),
+      "--on-change",
+      `node -e "require('fs').appendFileSync(process.env.MARK_FILE, JSON.stringify({r:process.env.WB_REASON,t:process.env.WB_TARGET}) + '\\n')"`,
+    ],
+    {
+      env: {
+        ...process.env,
+        WB_WS_SERVER: relay.url,
+        WB_STATE_DIR: stateDir,
+        WB_NO_PERSIST: "1",
+        WB_DEBOUNCE_MS: "100",
+        WB_SPAWN_COOLDOWN: "60",
+        MARK_FILE: markFile2,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  t.after(() => host2.kill());
+  let port2;
+  assert.ok(
+    await until(async () => {
+      try {
+        port2 = JSON.parse(
+          fs.readFileSync(path.join(stateDir, room2, "room.json"), "utf8"),
+        ).port;
+        return (await fetch(`http://127.0.0.1:${port2}/health`)).ok;
+      } catch {
+        return false;
+      }
+    }, 15_000),
+    "cooldown host came up",
+  );
+  const human2 = new ExcalidrawClient({ roomId: room2, roomKey: ROOM_KEY, username: "human" });
+  t.after(() => human2.close());
+  await human2.connect();
+  let seq = 0;
+  const ink = (text) =>
+    human2.syncElements([
+      {
+        id: `h2-${++seq}`,
+        type: "text",
+        x: seq * 50,
+        y: 100,
+        width: 100,
+        height: 25,
+        text,
+        originalText: text,
+        fontSize: 20,
+        version: 1,
+        versionNonce: seq,
+      },
+    ]);
+
+  // first human change spawns immediately (no prior spawn to cool down from)
+  await ink("first note");
+  assert.ok(await until(() => marks2().length === 1, 5000), "first spawn fired");
+
+  // second human change is held by the 60s cooldown
+  await ink("second note");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(marks2().length, 1, "human-change spawn respects the cooldown");
+
+  // a directive cuts through: merged into the queued spawn and fired now
+  await ink("@Solo look at this now");
+  assert.ok(await until(() => marks2().length === 2, 5000), "directive bypassed the cooldown");
+  const d = JSON.parse(marks2()[1]);
+  assert.equal(d.r, "directive");
+  assert.equal(d.t, "Solo");
 });

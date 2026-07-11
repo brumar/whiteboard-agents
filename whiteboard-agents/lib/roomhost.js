@@ -70,7 +70,7 @@ export async function runRoomHost(opts) {
     lastForeign: null, // last foreign element added (for auto-glance)
     startedAt: Date.now(),
     paused: false, // set by an @agents stop|pause board directive
-    pendingSpawnReason: null, // human-change|directive, consumed by --on-change
+    pendingSpawn: null, // {reason, targets:Set, directive} consumed by --on-change
   };
 
   // the room key never reaches logs or error output
@@ -225,7 +225,7 @@ export async function runRoomHost(opts) {
       summary: `${d.text}${handled ? " (handled by host)" : ""}`,
     });
 
-  function handleDirective(d) {
+  function handleDirective(d, { live = false } = {}) {
     if (d.target === "agents" && (d.verb === "stop" || d.verb === "pause")) {
       for (const agent of agents.values()) agent.seen.set(d.id, getEl(d.id)?.version ?? 0);
       journalDirective(d, true);
@@ -241,6 +241,17 @@ export async function runRoomHost(opts) {
     }
     if (!directives.has(d.id)) journalDirective(d, false);
     directives.set(d.id, d); // cleanup / summons / free-form: brains act on these
+    // route the spawner to the summoned persona(s); standing directives found
+    // at startup only surface via /diff, they don't wake a brain
+    if (live) {
+      const p =
+        state.pendingSpawn ||
+        (state.pendingSpawn = { reason: "directive", targets: new Set(), directive: null });
+      p.reason = "directive";
+      if (d.target === "agents") for (const n of agents.keys()) p.targets.add(n);
+      else p.targets.add(d.target);
+      p.directive = d.text;
+    }
   }
 
   const directivesFor = (agent) =>
@@ -252,12 +263,10 @@ export async function runRoomHost(opts) {
   function wireSceneEvents(client) {
     client.on("scene-changed", (els) => {
       state.dirty = true; // the 60s dirty sweep persists foreign changes
-      let sawDirective = false;
       for (const el of els) {
         const d = parseDirective(el);
         if (d) {
-          sawDirective = true;
-          handleDirective(d);
+          handleDirective(d, { live: true }); // fills state.pendingSpawn (directive)
         } else if (directives.has(el.id)) {
           directives.delete(el.id); // deleted or edited away
         }
@@ -270,9 +279,11 @@ export async function runRoomHost(opts) {
           ids: humanEls.map((e) => e.id),
           summary: humanEls.map((e) => e.type).join(","),
         });
+        if (!state.pendingSpawn) {
+          // plain human ink: no routing — the orchestrator decides who wakes
+          state.pendingSpawn = { reason: "human-change", targets: new Set(), directive: null };
+        }
       }
-      if (sawDirective) state.pendingSpawnReason = "directive";
-      else if (humanEls.length && !state.pendingSpawnReason) state.pendingSpawnReason = "human-change";
       scheduleWake();
       pushSceneToViewers();
       if (state.paused) return; // parked: no glances while paused
@@ -806,9 +817,9 @@ export async function runRoomHost(opts) {
       flushWaiters();
       // event-spawned brains (P2b): a burst with human changes or directives
       // and nobody long-polling means nobody will act — start a brain.
-      const reason = state.pendingSpawnReason;
-      state.pendingSpawnReason = null;
-      if (reason && !hadListeners) maybeSpawnBrain(reason);
+      const pending = state.pendingSpawn;
+      state.pendingSpawn = null;
+      if (pending && !hadListeners) maybeSpawnBrain(pending);
     }, DEBOUNCE_MS);
   }
   setInterval(flushWaiters, POLL_MS); // fallback sweep
@@ -816,23 +827,39 @@ export async function runRoomHost(opts) {
   // ---- --on-change brain spawner (single-flight + cooldown) --------------------
   let spawnChild = null;
   let lastSpawnAt = 0;
-  let spawnQueuedReason = null;
-  function maybeSpawnBrain(reason) {
+  let spawnQueued = null; // {reason, targets:Set, directive}
+  function maybeSpawnBrain(pending) {
     if (!onChange || state.paused) return;
-    spawnQueuedReason = reason;
+    if (spawnQueued) {
+      // merge bursts that arrive while a brain runs or the cooldown ticks
+      for (const t of pending.targets) spawnQueued.targets.add(t);
+      if (pending.reason === "directive") {
+        spawnQueued.reason = "directive";
+        spawnQueued.directive = pending.directive;
+      }
+    } else {
+      spawnQueued = pending;
+    }
     trySpawnBrain();
   }
   function trySpawnBrain() {
-    if (!spawnQueuedReason || spawnChild) return; // single-flight
-    const wait = SPAWN_COOLDOWN_MS - (Date.now() - lastSpawnAt);
+    if (!spawnQueued || spawnChild) return; // single-flight
+    // a directive is the human explicitly asking — don't make them wait out
+    // the cooldown; plain human changes keep it
+    const wait =
+      spawnQueued.reason === "directive" ? 0 : SPAWN_COOLDOWN_MS - (Date.now() - lastSpawnAt);
     if (wait > 0) {
       setTimeout(trySpawnBrain, wait + 10);
       return;
     }
-    const reason = spawnQueuedReason;
-    spawnQueuedReason = null;
+    const { reason, targets, directive } = spawnQueued;
+    spawnQueued = null;
     lastSpawnAt = Date.now();
-    logEvent(`on-change: spawning brain (${reason})`);
+    const targetList = [...targets];
+    logEvent(
+      `on-change: spawning brain (${reason}${targetList.length ? ` -> ${targetList.join(",")}` : ""})`,
+    );
+    journal({ agent: "host", event: "spawn", reason, targets: targetList });
     spawnChild = spawn(onChange, {
       shell: true,
       stdio: "inherit", // lands in host.log
@@ -841,12 +868,14 @@ export async function runRoomHost(opts) {
         WB_ROOM: roomId,
         WB_AGENTS: [...agents.keys()].join(","),
         WB_REASON: reason,
+        WB_TARGET: targetList.join(","), // summoned persona(s); empty = unrouted
+        WB_DIRECTIVE: (directive || "").slice(0, 200),
       },
     });
     spawnChild.on("exit", (code) => {
       spawnChild = null;
       logEvent(`on-change: brain exited (${code})`);
-      if (spawnQueuedReason) trySpawnBrain();
+      if (spawnQueued) trySpawnBrain();
     });
     spawnChild.on("error", (err) => {
       spawnChild = null;

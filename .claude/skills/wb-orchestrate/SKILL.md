@@ -64,15 +64,31 @@ cost in the system. When the user wants agents *available* rather than
 
 ```bash
 node bin/wb.js up --room "<link>" \
-  --on-change 'claude -p "Use the wb-agent skill. Board <link> changed (reason: $WB_REASON). Pick the persona(s) from $WB_AGENTS that should respond, run up to 5 cycles each, then exit."'
+  --on-change 'claude -p "Use the wb-agent skill. Board <link> changed (reason: $WB_REASON, summoned: $WB_TARGET, directive: $WB_DIRECTIVE). If WB_TARGET is set, be exactly those persona(s), up to 5 cycles each, then exit. If it is empty, be Echo alone as triage: acknowledge, then use the Handoff move to summon Sprout/Magpie/Grit only if the board calls for them."'
 ```
 
 The host runs the command only when the board changes (human ink or a
 directive) **and** no brain currently holds a `/wait` — single-flight, with a
 `WB_SPAWN_COOLDOWN` (default 120 s) so a chatty board doesn't fork-bomb
-sessions. Env passed: `WB_ROOM`, `WB_AGENTS`, `WB_REASON`. Presence (cursors,
-glances, acks-on-sight) stays live the whole time — only the thinking is
-on-demand.
+sessions. A *directive* spawn skips the cooldown (the human explicitly asked).
+Presence (cursors, glances, acks-on-sight) stays live the whole time — only
+the thinking is on-demand.
+
+**Routing contract** (env passed to the command):
+
+- `WB_ROOM`, `WB_AGENTS` — the room id and every persona the host carries.
+- `WB_REASON` — `directive` (a human wrote `@…` on the canvas) or `human-change`.
+- `WB_TARGET` — comma-joined summoned persona(s): `Grit` for `@Grit …`, the
+  whole cast for `@agents …`, **empty for plain human changes**. When set,
+  launch only those personas' wb-agent loops — one summoned brain, not four.
+- `WB_DIRECTIVE` — the directive text (truncated to 200 chars), so the brain
+  starts with the ask in hand instead of re-reading the board for it.
+
+When `WB_TARGET` is empty, prefer launching **Echo alone as triage** (Echo
+acknowledges, then uses the Handoff move to summon Sprout/Magpie/Grit when the
+board calls for them) instead of waking the full cast per change — cheaper and
+better theater. Waking everyone on every change is a valid but expensive
+variation; it's a property of the command you pass, not of the host.
 
 ## Variations
 
