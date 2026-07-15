@@ -134,6 +134,7 @@ export function makeText({
   textAlign = "left",
   angle = 0,
   opacity = 100,
+  link = null,
   customData,
 }) {
   const { width, height } = measureText(text, fontSize);
@@ -146,6 +147,7 @@ export function makeText({
     angle,
     opacity,
     strokeColor,
+    link,
     customData,
     text: String(text),
     fontSize,
@@ -203,6 +205,7 @@ export function makeNote({
   fontSize = 16,
   shape = "rectangle",
   minHeight = 60,
+  link = null,
   customData,
 }) {
   const innerWidth = width - 20;
@@ -221,6 +224,7 @@ export function makeNote({
     backgroundColor,
     customData,
   });
+  container.link = link;
   const textEl = base({
     type: "text",
     x: x + 10,

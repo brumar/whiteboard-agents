@@ -1,6 +1,6 @@
 ---
 name: wb-board
-description: Toolbox for interacting with a live Excalidraw whiteboard (excalidraw.com room links) — connect agents, read the board, draw elements, move a presence cursor. Use when the user shares an excalidraw.com/#room=... link or asks about whiteboard agents. For running full AI agents on a board, see wb-orchestrate (multiple) and wb-agent (single persona).
+description: Toolbox for interacting with a live Excalidraw whiteboard (excalidraw.com room links) — connect agents, read the board, draw elements, move a presence cursor. Use when the user shares an excalidraw.com/#room=... link or asks about whiteboard agents. For running full AI agents on a board, see wb-orchestrate (crew) and wb-agent (single agent).
 ---
 
 # Whiteboard toolbox (Excalidraw live collab)
@@ -17,11 +17,11 @@ cd whiteboard-agents && npm install   # first time only
 ## Connect / lifecycle
 
 ```bash
-node bin/wb.js start --room "<link>" --agent Echo --color "#1971c2" --bg "#a5d8ff" --slot 0
-node bin/wb.js up --room "<link>"        # start the whole default cast (agents/personas.json)
+node bin/wb.js start --room "<link>" --agent Agent-1 --color "#1971c2" --bg "#a5d8ff" --slot 0
+node bin/wb.js up --room "<link>" [--count 3 | --names "Ada,Bo"]   # start a neutral crew (default Agent-1..3)
 node bin/wb.js list                      # running rooms + their agents
-node bin/wb.js health
-node bin/wb.js stop --agent Echo         # detach one identity (host keeps running)
+node bin/wb.js health                    # also reports the deliverables dir + /d/ base URL
+node bin/wb.js stop --agent Agent-1      # detach one identity (host keeps running)
 node bin/wb.js stop --all                # stop the room host (all cursors leave)
 ```
 
@@ -65,12 +65,19 @@ node bin/render.js "<link>" board.png   # offline fallback when no host runs (bo
 
 ```bash
 node bin/wb.js ack --ids id1,id2 --glance          # mark seen (+cursor glance)
-node bin/wb.js note --text "..." [--near <id>] [--x 100 --y 200] [--bg "#fff9db"] [--ack-of <id>]
-node bin/wb.js text --text "..." [--near <id>] [--size 20]
+node bin/wb.js claim --ids id1,id2 [--release]     # reserve work items; {granted, denied} — first claim
+                                                   # wins, denied ⇒ a sibling has it, TTL 10 min
+node bin/wb.js note --text "..." [--near <id>] [--x 100 --y 200] [--bg "#fff9db"] [--link <url>] [--ack-of <id>]
+node bin/wb.js text --text "..." [--near <id>] [--size 20] [--link <url>]
 node bin/wb.js arrow --from <id> --to <id> [--label "feeds into"] [--style dashed]
+                                                   # binds to both endpoints (follows drags); the label
+                                                   # is bound to the arrow and stays centered on it
 node bin/wb.js react --target <id> --emoji "💡"
 node bin/wb.js sketch --kind circle|underline|check --target <id>
-node bin/wb.js status --text "watching · last: acked 2 notes"   # agent's card in the 🤖 corner
+node bin/wb.js status --text "watching · last: acked 2 notes"   # agent's card in the 🤖 corner;
+                                                   # its "FIXED Role:" line is the user's and is preserved
+node bin/wb.js publish --file <path> [--name x.md] # drop a file in deliverables/<roomId>/, prints the
+                                                   # localhost URL to use with --link (rich content pattern)
 node bin/wb.js cursor --target <id>                # or --x --y [--ms 800]
 node bin/wb.js gesture --kind point|circle|wave --target <id>
 node bin/wb.js save                                # force-persist (auto after every op)
@@ -79,6 +86,11 @@ node bin/wb.js save                                # force-persist (auto after e
 Complex/batched: `node bin/wb.js op --json '{"ops":[...]}'` with ops
 `note | text | shape | arrow | react | sketch | frame | status | update | delete | raw`
 (same fields as the flags; `update`/`delete` take `id` and work only on the agent's own elements).
+
+- Every agent-scoped read also returns `role` (the FIXED Role pinned on the
+  agent's card, `"None"` by default), the agent's active `claims`, and — right
+  after the user edits the role line — `roleChanged: true`. `wait` resolves on
+  role edits too, and summaries of claimed elements carry `claimedBy`.
 
 ## Behavior built into the daemon (free — don't reimplement)
 

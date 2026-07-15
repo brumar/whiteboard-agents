@@ -39,6 +39,7 @@ const CORNER = { x: -560, y: -460 }; // Agents' Corner (status cards)
 const NO_PERSIST = process.env.WB_NO_PERSIST === "1"; // tests: no Firestore traffic
 const SPAWN_COOLDOWN_MS = Number(process.env.WB_SPAWN_COOLDOWN || 120) * 1000; // --on-change single-flight
 const OPS_PER_MIN = Number(process.env.WB_OPS_PER_MIN || 30); // politeness: ops budget per agent
+const CLAIM_TTL_MS = Number(process.env.WB_CLAIM_TTL_MS || 10 * 60_000); // work claims expire (dead brains free their items)
 const SAVE_MIN_SPACING_MS = Number(process.env.WB_SAVE_SPACING_MS || 5000); // Firestore write spacing
 const JOURNAL_MAX_BYTES = 10 * 1024 * 1024; // rotate journal.jsonl at 10 MB
 const DEFAULT_COLOR = "#1971c2";
@@ -52,6 +53,11 @@ export async function runRoomHost(opts) {
   const dir = path.join(stateDir, roomId);
   fs.mkdirSync(dir, { recursive: true });
   const roomInfoPath = path.join(dir, "room.json");
+
+  // rich deliverables: files agents write for the room, served at /d/<name> so
+  // notes can carry clickable localhost links (outside .wb — survives `wb down`)
+  const deliverablesDir =
+    process.env.WB_DELIVERABLES_DIR || path.resolve(stateDir, "..", "deliverables", roomId);
 
   // the room key stops living in argv: persist it (0600) so every later
   // command can address the room by bare id (P10)
@@ -124,6 +130,42 @@ export async function runRoomHost(opts) {
   // ---- authorship & summaries ----------------------------------------------
   const authorOf = (el) => el?.customData?.wb?.agent || "human";
 
+  // ---- fixed roles (the user's line on each status card) ---------------------
+  // Card format: "🤖 <Name>\nFIXED Role: <role>\n<status text>". The role line
+  // belongs to the human: the host preserves it on every status write and
+  // reports it as `role` in contextInfo so brains re-read it each cycle.
+  const ROLE_RE = /^\s*FIXED Role:\s*(.*)$/im;
+  const roleFromText = (t) => {
+    const m = String(t ?? "").match(ROLE_RE);
+    const role = (m?.[1] || "").trim();
+    return !role || /^none$/i.test(role) ? "None" : role;
+  };
+  const roleOf = (agent) => {
+    const card = getEl(`wb-status-${agent.name}`);
+    return roleFromText(card?.originalText ?? card?.text);
+  };
+
+  // ---- work claims (neutral crew load-sharing) --------------------------------
+  // Advisory reservations: a brain claims an element before responding to it so
+  // identical siblings don't duplicate work. First claim wins; TTL frees items
+  // whose brain died mid-thought.
+  const claims = new Map(); // elementId -> {agent, ts}
+  const pruneClaims = () => {
+    for (const [id, c] of claims) {
+      if (Date.now() - c.ts > CLAIM_TTL_MS || getEl(id)?.isDeleted) claims.delete(id);
+    }
+  };
+  const claimedBy = (id) => {
+    const c = claims.get(id);
+    return c && Date.now() - c.ts <= CLAIM_TTL_MS ? c.agent : null;
+  };
+  const claimsHeldBy = (agent) => {
+    pruneClaims();
+    return [...claims.entries()]
+      .filter(([, c]) => c.agent === agent.name)
+      .map(([id, c]) => ({ id, ageSec: Math.round((Date.now() - c.ts) / 1000) }));
+  };
+
   const summarize = (el) => ({
     id: el.id,
     type: el.type,
@@ -139,8 +181,10 @@ export async function runRoomHost(opts) {
     ...(el.type === "image" ? { hasImage: true, ...(el.fileId ? { fileId: el.fileId } : {}) } : {}),
     ...(el.name != null ? { name: el.name } : {}),
     ...(el.containerId ? { containerId: el.containerId } : {}),
+    ...(el.link ? { link: el.link } : {}),
     ...(el.customData?.wb?.kind ? { kind: el.customData.wb.kind } : {}),
     ...(el.customData?.wb?.ackOf ? { ackOf: el.customData.wb.ackOf } : {}),
+    ...(claimedBy(el.id) ? { claimedBy: claimedBy(el.id) } : {}),
   });
 
   const getElements = ({ includeDeleted = true } = {}) => {
@@ -322,6 +366,25 @@ export async function runRoomHost(opts) {
           directives.delete(el.id); // deleted or edited away
         }
       }
+      // FIXED Role edits: a human rewrote the role line on an agent's status
+      // card (authorship stays with the agent, so this never lands in diffs) —
+      // detect it here and route a brain to its new standing orders.
+      for (const el of els) {
+        const m = /^wb-status-(.+)$/.exec(el.id || "");
+        const cardAgent = m && agents.get(m[1]);
+        if (!cardAgent) continue;
+        const role = roleFromText(el.originalText ?? el.text);
+        if (role === cardAgent.cardRole) continue;
+        cardAgent.cardRole = role;
+        logEvent(`role[${cardAgent.name}]: ${role}`);
+        journal({ agent: "human", event: "role", target: cardAgent.name, role });
+        const p =
+          state.pendingSpawn ||
+          (state.pendingSpawn = { reason: "directive", targets: new Set(), directive: null });
+        p.reason = "directive";
+        p.targets.add(cardAgent.name);
+        p.directive = `FIXED Role: ${role}`;
+      }
       const humanEls = els.filter((e) => authorOf(e) === "human");
       if (humanEls.length) {
         journal({
@@ -375,6 +438,9 @@ export async function runRoomHost(opts) {
       color: color || DEFAULT_COLOR,
       background: background || DEFAULT_BG,
       slot: resolvedSlot,
+      cardRole: roleFromText(
+        getEl(`wb-status-${name}`)?.originalText ?? getEl(`wb-status-${name}`)?.text,
+      ),
       seen,
       seenPath,
       client: new ExcalidrawClient({
@@ -614,6 +680,7 @@ export async function runRoomHost(opts) {
           backgroundColor: op.bg || background,
           shape: op.shape || "rectangle",
           fontSize: op.size || 16,
+          link: op.link || null,
           customData: { wb: { kind: op.kind || "note", ...(op.ackOf ? { ackOf: op.ackOf } : {}) } },
         });
         await visit(agent, pos.x + width / 2, pos.y - 30);
@@ -629,6 +696,7 @@ export async function runRoomHost(opts) {
           y: pos.y,
           fontSize: size,
           strokeColor: op.color || color,
+          link: op.link || null,
           customData: { wb: { kind: op.kind || "text" } },
         });
         await visit(agent, pos.x, pos.y - 30);
@@ -663,10 +731,12 @@ export async function runRoomHost(opts) {
         return insertElements(agent, created);
       }
       case "arrow": {
-        let x, y, points;
+        let x, y, points, fromEl, toEl;
         if (op.from && op.to) {
-          const a = bbox(getEl(op.from));
-          const b = bbox(getEl(op.to));
+          fromEl = getEl(op.from);
+          toEl = getEl(op.to);
+          const a = bbox(fromEl);
+          const b = bbox(toEl);
           if (!a || !b) throw new Error("arrow: from/to element not found");
           ({ x, y, points } = edgeToEdge(a, b));
         } else {
@@ -680,23 +750,38 @@ export async function runRoomHost(opts) {
           strokeStyle: op.style || "solid",
           customData: { wb: { kind: "arrow" } },
         });
+        // real bindings: the arrow re-routes when the human drags an endpoint
+        if (fromEl && toEl) {
+          el.startBinding = { elementId: fromEl.id, focus: 0, gap: 8 };
+          el.endBinding = { elementId: toEl.id, focus: 0, gap: 8 };
+        }
         const created = [el];
         if (op.label) {
-          const mid = points[Math.floor(points.length / 2)];
+          // native bound label (containerId = arrow): excalidraw keeps it
+          // centered on the arrow instead of a floating text drifting nearby
+          const end = points[points.length - 1];
           const m = measureText(op.label, 14);
-          created.push(
-            makeText({
-              text: op.label,
-              x: x + mid[0] / 2 - m.width / 2,
-              y: y + mid[1] / 2 - m.height - 6,
-              fontSize: 14,
-              strokeColor: op.color || color,
-              customData: { wb: { kind: "label" } },
-            }),
-          );
+          const label = makeText({
+            text: op.label,
+            x: x + end[0] / 2 - m.width / 2,
+            y: y + end[1] / 2 - m.height / 2,
+            fontSize: 14,
+            strokeColor: op.color || color,
+            textAlign: "center",
+            customData: { wb: { kind: "label" } },
+          });
+          label.containerId = el.id;
+          label.verticalAlign = "middle";
+          el.boundElements = [{ type: "text", id: label.id }];
+          created.push(label);
         }
         await visit(agent, x, y - 20);
-        return insertElements(agent, created);
+        const ids = await insertElements(agent, created);
+        // register the arrow on both endpoints (excalidraw finds attached
+        // arrows through the shape's boundElements). Metadata-only touch:
+        // allowed even on human ink, pre-acked for every agent.
+        if (fromEl && toEl) await registerArrowOnEndpoints(agent, [fromEl, toEl], el.id);
+        return ids;
       }
       case "react": {
         const t = bbox(getEl(op.target));
@@ -778,17 +863,21 @@ export async function runRoomHost(opts) {
         return insertElements(agent, [el]);
       }
       case "status": {
-        // Agent status card in the Agents' Corner — one per agent, updated in place.
+        // Agent status card in the Agents' Corner — one per agent, updated in
+        // place. The FIXED Role line is the human's: preserve whatever they
+        // wrote there, only replace the status text below it.
         const cardId = `wb-status-${agent.name}`;
         const existing = getEl(cardId);
-        const text = `🤖 ${agent.name}\n${op.text}`;
+        const role = roleOf(agent);
+        agent.cardRole = role;
+        const text = `🤖 ${agent.name}\nFIXED Role: ${role}\n${op.text}`;
         if (existing) {
           return patchElement(agent, cardId, { text, originalText: text, ...measureText(text, 14) });
         }
         const el = makeText({
           text,
           x: CORNER.x + 20,
-          y: CORNER.y + 30 + agent.slot * 70,
+          y: CORNER.y + 30 + agent.slot * 80,
           fontSize: 14,
           strokeColor: color,
           customData: { wb: { kind: "status" } },
@@ -800,7 +889,7 @@ export async function runRoomHost(opts) {
             x: CORNER.x,
             y: CORNER.y,
             width: 340,
-            height: 320,
+            height: 30 + Math.max(4, agents.size) * 80,
             name: "🤖 Agents",
             customData: { wb: { kind: "frame" } },
           });
@@ -829,6 +918,39 @@ export async function runRoomHost(opts) {
       default:
         throw new Error(`unknown op: ${op.op}`);
     }
+  }
+
+  // Add {id: arrowId, type: "arrow"} to each endpoint's boundElements so the
+  // arrow follows drags. This edits elements the agent may not own, but only
+  // binding metadata — content, position and authorship stay untouched. The
+  // bump is pre-acked for every agent so it never shows up as diff noise.
+  async function registerArrowOnEndpoints(agent, targets, arrowId) {
+    const touched = [];
+    for (const t of targets) {
+      const el = getEl(t.id);
+      if (!el) continue;
+      const bound = (el.boundElements || []).filter((b) => b.id !== arrowId);
+      const next = {
+        ...el,
+        boundElements: [...bound, { id: arrowId, type: "arrow" }],
+        version: (el.version || 1) + 1,
+        versionNonce: Math.floor(Math.random() * 2 ** 31),
+        updated: Date.now(),
+      };
+      scene.set(el.id, next);
+      // fast-forward only agents already caught up on this element — an agent
+      // that still owes it a look must keep seeing it in its diff
+      for (const a of agents.values()) {
+        const seenV = Number(a.seen.get(el.id) ?? -1);
+        if (a === agent || seenV >= (el.version || 1)) a.seen.set(el.id, next.version);
+      }
+      touched.push(next);
+    }
+    if (!touched.length) return;
+    await agent.client.syncElements(touched);
+    for (const a of agents.values()) saveSeen(a);
+    scheduleSave();
+    pushSceneToViewers();
   }
 
   async function patchElement(agent, id, props) {
@@ -862,10 +984,17 @@ export async function runRoomHost(opts) {
     for (let i = waiters.length - 1; i >= 0; i--) {
       const w = waiters[i];
       const diff = computeDiff(w.agent);
-      if (!diff.length) continue;
+      // a role edit never shows in the diff (own element) — wake on it anyway
+      const roleChanged =
+        w.agent.lastRoleSeen !== undefined && roleOf(w.agent) !== w.agent.lastRoleSeen;
+      if (!diff.length && !roleChanged) continue;
       waiters.splice(i, 1);
       clearTimeout(w.timer);
-      w.respond({ changes: diff, ...contextInfo(w.agent) });
+      w.respond({
+        changes: diff,
+        ...(roleChanged ? { roleChanged: true } : {}),
+        ...contextInfo(w.agent),
+      });
     }
   };
   let wakeTimer = null;
@@ -946,8 +1075,13 @@ export async function runRoomHost(opts) {
   const contextInfo = (agent) => {
     prunePeers();
     const focus = humanFocus();
+    const role = agent ? roleOf(agent) : null;
+    if (agent) agent.lastRoleSeen = role; // waiters wake when the card's role drifts from this
+    const myClaims = agent ? claimsHeldBy(agent) : [];
     return {
       agent: agent?.name,
+      ...(agent ? { role } : {}),
+      ...(myClaims.length ? { claims: myClaims } : {}),
       collaborators: (primary || agent)?.client.collaborators.size ?? 0,
       humans: humansPresent(),
       ...(focus ? { focus } : {}),
@@ -1106,6 +1240,7 @@ export async function runRoomHost(opts) {
           connected: !!primary?.client.socket?.connected,
           collaborators: primary?.client.collaborators.size ?? 0,
           elements: liveElements().length,
+          deliverables: { dir: deliverablesDir, base: `http://127.0.0.1:${port}/d/` },
           uptimeMs: Date.now() - state.startedAt,
         });
       }
@@ -1168,6 +1303,33 @@ export async function runRoomHost(opts) {
         const f = await fileStore.load(id); // 404s with a clear error via the catch below
         res.writeHead(200, { "content-type": f.mimeType || "application/octet-stream" });
         return res.end(Buffer.from(f.bytes));
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/d/")) {
+        // serve a room deliverable (published via `wb publish`)
+        const name = decodeURIComponent(url.pathname.slice(3));
+        if (!name || name.includes("..") || path.isAbsolute(name)) {
+          return respond(400, { error: "bad deliverable name" });
+        }
+        const p = path.join(deliverablesDir, name);
+        if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
+          return respond(404, { error: `no deliverable named ${name}` });
+        }
+        const type =
+          {
+            ".md": "text/plain; charset=utf-8", // plain so browsers render it inline
+            ".txt": "text/plain; charset=utf-8",
+            ".html": "text/html; charset=utf-8",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+            ".json": "application/json",
+            ".csv": "text/csv; charset=utf-8",
+            ".pdf": "application/pdf",
+          }[path.extname(p).toLowerCase()] || "application/octet-stream";
+        res.writeHead(200, { "content-type": type });
+        return res.end(fs.readFileSync(p));
       }
       if (req.method === "GET" && url.pathname === "/view") {
         await getViewerAssets();
@@ -1266,6 +1428,37 @@ export async function runRoomHost(opts) {
           }
           return respond(200, { ok: true });
         }
+        if (url.pathname === "/claim") {
+          // advisory work reservations: first claim wins, release frees early,
+          // TTL frees the rest. Bookkeeping like /ack — not rate-limited.
+          const agent = resolveAgent(agentName);
+          pruneClaims();
+          const granted = [];
+          const denied = {};
+          for (const id of body.ids || []) {
+            const cur = claims.get(id);
+            if (body.release) {
+              if (cur?.agent === agent.name) {
+                claims.delete(id);
+                granted.push(id);
+              } else denied[id] = cur?.agent || null;
+              continue;
+            }
+            if (!getEl(id) || getEl(id).isDeleted) {
+              denied[id] = null; // nothing to claim
+              continue;
+            }
+            if (cur && cur.agent !== agent.name) {
+              denied[id] = cur.agent;
+              continue;
+            }
+            claims.set(id, { agent: agent.name, ts: Date.now() });
+            granted.push(id);
+          }
+          if (granted.length)
+            journal({ agent: agent.name, event: body.release ? "release" : "claim", ids: granted });
+          return respond(200, { granted, denied });
+        }
         if (url.pathname === "/ack") {
           const agent = resolveAgent(agentName);
           for (const id of body.ids || []) {
@@ -1318,7 +1511,34 @@ export async function runRoomHost(opts) {
     }
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  // prefer the previous run's port so published /d/ links survive restarts
+  const prevPort = (() => {
+    try {
+      const p = JSON.parse(fs.readFileSync(roomInfoPath, "utf8")).port;
+      return Number.isInteger(p) && p > 1023 && p < 65536 ? p : null;
+    } catch {
+      return null;
+    }
+  })();
+  const listenOn = (p) =>
+    new Promise((resolve, reject) => {
+      const onErr = (err) => {
+        server.off("listening", onOk);
+        reject(err);
+      };
+      const onOk = () => {
+        server.off("error", onErr);
+        resolve();
+      };
+      server.once("error", onErr);
+      server.once("listening", onOk);
+      server.listen(p, "127.0.0.1");
+    });
+  try {
+    await listenOn(prevPort || 0);
+  } catch {
+    await listenOn(0);
+  }
   port = server.address().port;
 
   function writeInfoFiles() {

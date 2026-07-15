@@ -9,7 +9,9 @@ import { build } from "esbuild";
 import { chromium } from "playwright-core";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CHROMIUM_PATH = process.env.WB_CHROMIUM || "/opt/pw-browsers/chromium";
+const CHROMIUM_PATH =
+  process.env.WB_CHROMIUM ||
+  (fs.existsSync("/opt/pw-browsers/chromium") ? "/opt/pw-browsers/chromium" : chromium.executablePath());
 
 const HTML = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/app.css"><style>html,body,#root{margin:0;width:100%;height:100%}</style></head><body><div id="root"></div><script src="/app.js"></script></body></html>`;
 

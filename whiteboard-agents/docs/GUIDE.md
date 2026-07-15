@@ -8,9 +8,11 @@
 
 **whiteboard-agents** puts AI agents with *real presence* on a live
 [excalidraw.com](https://excalidraw.com) whiteboard. Each agent shows up in your
-room as a named cursor with its own color and temperament: it moves, glances at
-what you write, acknowledges your work with reactions and small notes, and
-contributes ideas alongside you.
+room as a named cursor with its own color: it moves, glances at what you write,
+acknowledges your work with reactions and small notes, and contributes ideas
+alongside you. The crew is neutral and interchangeable — agents split incoming
+work via claims, and you can pin standing orders on any of them by editing the
+`FIXED Role:` line on its status card.
 
 The project splits the problem in two:
 
@@ -23,15 +25,14 @@ The project splits the problem in two:
   through a small localhost HTTP API / CLI.
 
 ```
-you (excalidraw.com) ───────┐
-                            ├── excalidraw-room relay (E2E encrypted)
-room host ── 🤖 Echo   ─────┤        ▲
- (one       ├ 🤖 Sprout ────┤        │ scene persisted (encrypted) to
-  process)  ├ 🤖 Magpie ────┤        ▼ excalidraw's firestore
-            └ 🤖 Grit   ────┘   (one socket per agent, one shared scene)
-     ▲ localhost HTTP
+you (excalidraw.com) ─────────┐
+                              ├── excalidraw-room relay (E2E encrypted)
+room host ── 🤖 Agent-1 ──────┤        ▲
+ (one       ├ 🤖 Agent-2 ─────┤        │ scene persisted (encrypted) to
+  process)  └ 🤖 Agent-3 ─────┘        ▼ excalidraw's firestore
+     ▲ localhost HTTP           (one socket per agent, one shared scene)
      │
-  wb CLI  ◄── Claude Code agents (the "brains", one per persona)
+  wb CLI  ◄── Claude Code agents (the "brains", one per crew member)
 ```
 
 No excalidraw.com account, server-side changes, or browser extension is needed —
@@ -57,10 +58,10 @@ cd whiteboard-agents
 npm install
 ```
 
-Put the whole default cast (Echo, Sprout, Magpie, Grit) on your board:
+Put a crew (Agent-1..3 by default) on your board:
 
 ```bash
-node bin/wb.js up --room "https://excalidraw.com/#room=<id>,<key>"
+node bin/wb.js up --room "https://excalidraw.com/#room=<id>,<key>" [--count 3]
 node bin/wb.js list        # verify the room host is alive and agents connected
 ```
 
@@ -73,17 +74,26 @@ glances, cursor animation are automatic). The *decisions* — writing notes,
 challenging ideas — come from LLM brains running the `wb-agent` loop, typically
 launched by the `wb-orchestrate` skill, or by the host's `--on-change` hook.
 
-### 2.3 Meet the cast
+### 2.3 Meet the crew
 
-Personas are data (`agents/personas.json`), not code — edit the file or pass
-`--personas <file>` to bring your own cast.
+There are no personas. `wb up` starts N interchangeable workers (`--count`,
+`--names` for custom names), each with a fixed color per slot. Every agent owns
+the full repertoire of moves; they divide incoming work among themselves with
+**claims** (first agent to reserve an element responds to it, the others skip it).
 
-| Agent | Color | Role | What it does |
-|---|---|---|---|
-| **Echo** | 🔵 blue | host & synthesizer | acknowledges everything fast, keeps a living summary note, seeds gentle questions; never criticizes |
-| **Sprout** | 🟢 green | expander / idea gardener | grows your ideas with 1–2 concrete branch notes and examples, offers to turn lists into diagrams |
-| **Magpie** | 🟣 purple | connector & curator | draws labeled arrows between distant ideas ("same root cause", "tension"), proposes named clusters |
-| **Grit** | 🟠 orange | loyal opposition | stress-tests *mature* ideas with one pointed question per cycle, flags hidden assumptions with ⚠ |
+Differentiation belongs to *you*, live on the board: each agent keeps a status
+card in the "🤖 Agents" corner reading
+
+```
+🤖 Agent-2
+FIXED Role: None
+<what it's doing right now>
+```
+
+Edit the `FIXED Role:` line ("skeptic", "summarizer", "translate to French", …)
+and that agent adopts it as standing orders — the host preserves your line
+forever after and wakes the agent with its new role. Set it back to `None` to
+return the agent to the neutral pool.
 
 ### 2.4 What the agents will (and won't) do
 
@@ -103,7 +113,13 @@ legible acts on the board — and firm etiquette:
 - **Every agent signs its work** in element metadata (`customData.wb.agent`), so
   authorship is machine-checkable; anything unsigned is treated as human ink.
 - **Status cards**: each agent keeps one card in the "🤖 Agents" corner frame
-  saying what it's watching and what it did last.
+  saying what it's doing right now, under the `FIXED Role:` line that belongs
+  to you.
+- **One receipt per work item**: acks are coordinated through claims, so you
+  get one visible receipt from the crew per piece of work, not one per agent.
+- **Depth goes in files**: anything longer than a few lines (analyses,
+  research, tables) is written to `deliverables/<roomId>/` on your machine and
+  linked from a short abstract note — click the link icon on the note to open it.
 
 ### 2.5 Steering from the canvas — the board is the chat
 
@@ -115,7 +131,8 @@ board:
 | `@agents stop` or `@agents pause` | the host itself pauses everything: cursors park, ops are rejected, agents' status cards say "paused by board" |
 | `@agents resume` | everything wakes back up |
 | `@agents cleanup` | agents delete their own stale reactions/seeds (never your ink) |
-| `@Grit what would break this?` | summons one agent — the directive is delivered to that agent's brain, which comes to that spot and answers on the canvas |
+| `@Agent-2 what would break this?` | summons one agent — the directive is delivered to that agent's brain, which comes to that spot and answers on the canvas |
+| edit `FIXED Role:` on a status card | pins standing orders on that agent (counts as a directive: it wakes that agent's brain with the new role) |
 
 `stop`/`pause`/`resume` are handled instantly by the host process itself; other
 directives are surfaced to the brains via the API. A standing `@agents pause`
@@ -126,16 +143,18 @@ note even applies to hosts started later.
 Everything the brains can do, you can do from the terminal:
 
 ```bash
-node bin/wb.js note  --agent Echo --text "hello from the terminal"
-node bin/wb.js react --agent Echo --target <elementId> --emoji "💡"
-node bin/wb.js arrow --agent Magpie --from <id> --to <id> --label "feeds into"
-node bin/wb.js sketch --agent Sprout --kind underline --target <id>
-node bin/wb.js gesture --agent Grit --kind point --target <id>
-node bin/wb.js wait  --agent Echo --timeout 60    # block until board activity
+node bin/wb.js note  --agent Agent-1 --text "hello from the terminal" [--link <url>]
+node bin/wb.js react --agent Agent-1 --target <elementId> --emoji "💡"
+node bin/wb.js arrow --agent Agent-1 --from <id> --to <id> --label "feeds into"   # bound: follows drags
+node bin/wb.js claim --agent Agent-1 --ids <id> [--release]   # reserve a work item
+node bin/wb.js publish --file analysis.md         # → localhost URL for `note --link`
+node bin/wb.js sketch --agent Agent-2 --kind underline --target <id>
+node bin/wb.js gesture --agent Agent-3 --kind point --target <id>
+node bin/wb.js wait  --agent Agent-1 --timeout 60 # block until board activity or a role edit
 node bin/wb.js render --out board.png             # see the board (~350ms warm)
 node bin/wb.js view                               # URL of a live read-only browser viewer
 node bin/wb.js journal --tail 50                  # replayable log of the session
-node bin/wb.js stop --agent Echo                  # detach one agent
+node bin/wb.js stop --agent Agent-1               # detach one agent
 node bin/wb.js stop --all                         # stop the room host
 node bin/wb.js down --room <id>                   # stop AND purge local state
 ```
@@ -150,9 +169,17 @@ argv, logs, and error messages (it's actively redacted).
 - **Live presence**: one real websocket per agent, so excalidraw.com shows each
   agent as a genuine named collaborator with an animated cursor (eased moves,
   idle drift, auto-glance at your edits, ~15 fps, frame-skipped).
-- **Full element repertoire**: sticky notes with bound text, plain text, shapes
-  with labels, labeled arrows (auto-trimmed edge-to-edge), emoji reactions,
-  hand-drawn underlines/checks/highlight rings, frames.
+- **Full element repertoire**: sticky notes with bound text (and optional
+  hyperlinks), plain text, shapes with labels, bound arrows (attached to both
+  endpoints so they re-route when you drag things, with native labels riding
+  the arrow), emoji reactions, hand-drawn underlines/checks/highlight rings, frames.
+- **Rich deliverables**: `wb publish` drops any file into
+  `deliverables/<roomId>/` and the host serves it at `/d/<name>` — notes link
+  to real documents instead of becoming walls of text (the host re-uses its
+  previous port on restart so links keep working).
+- **Work sharing**: `wb claim` reserves elements per agent (first claim wins,
+  10-minute TTL), which is how a crew of identical agents avoids answering in
+  triplicate.
 - **Collision-free placement**: new ink spirals outward until it finds free
   space — agents write in the margins, never on top of content.
 - **Persistence**: the scene is merge-saved (encrypted) to excalidraw's own
@@ -200,7 +227,7 @@ whiteboard-agents/
 │   ├── render.js        # one-shot offline render to PNG
 │   └── snapshot.js      # scene dump utility
 ├── viewer/app.jsx       # minimal offline Excalidraw viewer (render + live view)
-├── agents/personas.json # the cast: name, color, temperament, prompt per persona
+├── deliverables/<room>/ # rich files agents publish, served at /d/<name>
 ├── test/                # node:test suites + render smoke test
 ├── INTERACTIONS.md      # interaction design: typology of moves, choreography
 ├── PREPLAN.md, PROPOSITIONS.md   # design/planning notes
@@ -208,8 +235,11 @@ whiteboard-agents/
 ```
 
 The Claude Code skills that drive the brains live in the repo root's
-`.claude/skills/`: `wb-board` (toolbox), `wb-agent` (one persona's loop),
-`wb-orchestrate` (run the whole cast).
+`.claude/skills/`: `wb-board` (toolbox), `wb-agent` (one agent's loop),
+`wb-orchestrate` (run the whole crew). `npm run skills:install`
+(`bin/install-skills.js`) copies them to `~/.claude/skills/` with paths
+rewritten to absolute, so the crew can be summoned from any directory;
+re-run it after editing a skill, `--uninstall` removes the copies.
 
 ### 3.2 The big picture
 
@@ -332,7 +362,8 @@ elements that survive excalidraw's `restoreElements` (validated in tests):
   pinned near the target), `sketch` (underline / check / highlight-circle as
   freedraw/ellipse), `frame`, `status` (one per-agent card in the "🤖 Agents"
   corner frame at fixed coordinates, updated in place via a deterministic
-  element id), `update`, `delete`, `raw`. Ops auto-place via `placeNear` →
+  element id — its `FIXED Role:` line is parsed from the existing card and
+  preserved, never overwritten), `update`, `delete`, `raw`. Ops auto-place via `placeNear` →
   `findFreeSpace`, and most ops first `visit()` the spot — the cursor travels
   there before ink appears, so actions read sequentially, like someone working.
 - **Observability**: an append-only `journal.jsonl` (rotated at 10 MB) records
@@ -353,10 +384,12 @@ elements that survive excalidraw's `restoreElements` (validated in tests):
 | `GET /render?crop=content\|frame:<id>` | PNG through the warm renderer |
 | `GET /view`, `GET /events` | live read-only viewer page + its SSE feed |
 | `GET /journal?tail=` | recent journal entries |
+| `GET /d/<name>` | serve a published deliverable from `deliverables/<roomId>/` |
 | `POST /op` | one op or `{ops:[…]}` — rate-limited, rejected while paused |
 | `POST /agents`, `DELETE /agents/<name>` | add / detach an agent identity at runtime |
 | `POST /cursor`, `POST /gesture` | move the cursor; point / circle / wave gestures |
 | `POST /ack` | mark element versions as seen (optionally glance at them) |
+| `POST /claim` | reserve work items (`{ids, release?}` → `{granted, denied}`) |
 | `POST /save` | force compaction + merge-save to Firestore |
 | `POST /quit` | flush seen-maps, close sockets, exit |
 
@@ -424,9 +457,10 @@ The behavioral contract for brains, summarized: moves are typed (presence →
 acknowledgment → generative → structural → critical → meta) with escalating
 cost and discipline; acknowledge before contributing; ≤1 contribution per cycle;
 never touch human ink; each agent keeps one color and a status card; the board
-itself is the only channel (`@…` directives in, ink out). Read it before writing
-a new persona — the host enforces the mechanics (placement, ownership, rate
-limits, pause), but the *taste* lives in the persona prompts.
+itself is the only channel (`@…` directives in, ink out). Read it before
+changing brain behavior — the host enforces the mechanics (placement,
+ownership, claims, rate limits, pause), but the *taste* lives in the wb-agent
+skill prompt and in whatever `FIXED Role:` the user pins.
 
 ### 3.10 Testing
 
@@ -446,8 +480,8 @@ npm run test:render   # renders a scene through the real excalidraw renderer
 
 Useful env knobs while developing: `WB_STATE_DIR`, `WB_NO_PERSIST=1`,
 `WB_RENDER=0`, `WB_WS_SERVER` (point at a local relay), `WB_DEBOUNCE_MS`,
-`WB_OPS_PER_MIN`, `WB_TOMBSTONE_MS`, `WB_SPAWN_COOLDOWN`, `WB_ROOM_KEY`,
-`WB_CHROMIUM`.
+`WB_OPS_PER_MIN`, `WB_TOMBSTONE_MS`, `WB_SPAWN_COOLDOWN`, `WB_CLAIM_TTL_MS`,
+`WB_DELIVERABLES_DIR`, `WB_ROOM_KEY`, `WB_CHROMIUM`.
 
 ### 3.11 Where to start reading
 

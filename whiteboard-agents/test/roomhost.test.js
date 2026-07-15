@@ -52,6 +52,7 @@ test.before(async () => {
         ...process.env,
         WB_WS_SERVER: relay.url,
         WB_STATE_DIR: stateDir,
+        WB_DELIVERABLES_DIR: path.join(stateDir, "deliverables"),
         WB_NO_PERSIST: "1",
         WB_DEBOUNCE_MS: "100",
         WB_TOMBSTONE_MS: "50",
@@ -145,6 +146,150 @@ test("human changes reach every agent's diff through the shared scene", async (t
     assert.ok(changes.some((c) => c.id === "h-1"), `${agent} should see the human element`);
     await api("POST", `/ack?agent=${agent}`, { ids: ["h-1"] });
   }
+});
+
+test("status cards carry a FIXED Role line that the human owns", async (t) => {
+  await api("POST", "/op?agent=Alpha", { ops: [{ op: "status", text: "reading the board" }] });
+  const { data: d1 } = await api("GET", "/diff?agent=Alpha");
+  assert.equal(d1.role, "None", "role defaults to None");
+
+  const { data: scene1 } = await api("GET", "/scene?full=1");
+  const card = scene1.elements.find((e) => e.id === "wb-status-Alpha");
+  assert.match(card.text, /^🤖 Alpha\nFIXED Role: None\nreading the board$/);
+
+  // the human pins a role by editing the card on the canvas
+  const human = new ExcalidrawClient({ roomId: ROOM_ID, roomKey: ROOM_KEY, username: "human" });
+  t.after(() => human.close());
+  await human.connect();
+  const pinned = "🤖 Alpha\nFIXED Role: skeptic\nreading the board";
+  await human.syncElements([
+    { ...card, text: pinned, originalText: pinned, version: card.version + 1, versionNonce: card.versionNonce + 1 },
+  ]);
+
+  let role = "None";
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && role !== "skeptic") {
+    ({ data: { role } } = await api("GET", "/diff?agent=Alpha"));
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(role, "skeptic", "role edits surface in every response");
+  const { data: d2 } = await api("GET", "/diff?agent=Alpha");
+  assert.ok(
+    !d2.changes.some((c) => c.id === "wb-status-Alpha"),
+    "own status card never lands in the diff",
+  );
+
+  // the next status write preserves the human's role line
+  await api("POST", "/op?agent=Alpha", { ops: [{ op: "status", text: "linked two notes" }] });
+  const { data: scene2 } = await api("GET", "/scene?full=1");
+  const card2 = scene2.elements.find((e) => e.id === "wb-status-Alpha");
+  assert.match(card2.text, /^🤖 Alpha\nFIXED Role: skeptic\nlinked two notes$/);
+});
+
+test("a parked wait wakes when the human edits the role line", async (t) => {
+  await api("POST", "/op?agent=Beta", { ops: [{ op: "status", text: "idle" }] });
+  await api("GET", "/diff?agent=Beta"); // sets lastRoleSeen
+
+  const waiting = api("GET", "/wait?agent=Beta&timeout=8");
+  await new Promise((r) => setTimeout(r, 200)); // let the waiter park
+
+  const human = new ExcalidrawClient({ roomId: ROOM_ID, roomKey: ROOM_KEY, username: "human" });
+  t.after(() => human.close());
+  await human.connect();
+  const { data: scene } = await api("GET", "/scene?full=1");
+  const card = scene.elements.find((e) => e.id === "wb-status-Beta");
+  const pinned = card.text.replace("FIXED Role: None", "FIXED Role: connector");
+  await human.syncElements([
+    { ...card, text: pinned, originalText: pinned, version: card.version + 1, versionNonce: card.versionNonce + 1 },
+  ]);
+
+  const { data } = await waiting;
+  assert.equal(data.roleChanged, true, "wait resolves on a role edit, not just board changes");
+  assert.equal(data.role, "connector");
+});
+
+test("claims share the workload: first claim wins, release frees", async () => {
+  const { data: op } = await api("POST", "/op?agent=Alpha", {
+    ops: [
+      { op: "text", text: "item one", x: 400, y: 400 },
+      { op: "text", text: "item two", x: 400, y: 450 },
+    ],
+  });
+  const [one, two] = op.ids;
+
+  const { data: a } = await api("POST", "/claim?agent=Alpha", { ids: [one, two] });
+  assert.deepEqual(a.granted.sort(), [one, two].sort());
+
+  const { data: b } = await api("POST", "/claim?agent=Beta", { ids: [one] });
+  assert.deepEqual(b.granted, []);
+  assert.equal(b.denied[one], "Alpha");
+
+  // siblings see the reservation in summaries
+  const { data: scene } = await api("GET", "/scene");
+  assert.equal(scene.elements.find((e) => e.id === one).claimedBy, "Alpha");
+
+  // holder's claims ride along in contextInfo
+  const { data: diff } = await api("GET", "/diff?agent=Alpha");
+  assert.ok(diff.claims.some((c) => c.id === one));
+
+  const { data: rel } = await api("POST", "/claim?agent=Alpha", { ids: [one], release: true });
+  assert.deepEqual(rel.granted, [one]);
+  const { data: b2 } = await api("POST", "/claim?agent=Beta", { ids: [one] });
+  assert.deepEqual(b2.granted, [one]);
+
+  // cleanup so later tests see no stale claims
+  await api("POST", "/claim?agent=Beta", { ids: [one], release: true });
+  await api("POST", "/claim?agent=Alpha", { ids: [two], release: true });
+});
+
+test("arrows bind to their endpoints and carry a bound label", async () => {
+  const { data: n1 } = await api("POST", "/op?agent=Alpha", {
+    ops: [{ op: "note", text: "cause", x: 1000, y: 1000 }],
+  });
+  const { data: n2 } = await api("POST", "/op?agent=Alpha", {
+    ops: [{ op: "note", text: "effect", x: 1400, y: 1000 }],
+  });
+  const [fromId] = n1.ids;
+  const [toId] = n2.ids;
+
+  const { data: ar } = await api("POST", "/op?agent=Alpha", {
+    ops: [{ op: "arrow", from: fromId, to: toId, label: "feeds into" }],
+  });
+  const { data: scene } = await api("GET", "/scene?full=1");
+  const arrow = scene.elements.find((e) => ar.ids.includes(e.id) && e.type === "arrow");
+  const label = scene.elements.find((e) => ar.ids.includes(e.id) && e.type === "text");
+
+  assert.equal(arrow.startBinding?.elementId, fromId);
+  assert.equal(arrow.endBinding?.elementId, toId);
+  assert.equal(label.containerId, arrow.id, "label is bound to the arrow, not floating");
+  assert.deepEqual(arrow.boundElements, [{ type: "text", id: label.id }]);
+  for (const endId of [fromId, toId]) {
+    const end = scene.elements.find((e) => e.id === endId);
+    assert.ok(
+      (end.boundElements || []).some((b) => b.id === arrow.id && b.type === "arrow"),
+      "endpoint knows about the arrow so drags re-route it",
+    );
+  }
+});
+
+test("notes carry hyperlinks; deliverables are served over /d/", async () => {
+  const { data: op } = await api("POST", "/op?agent=Alpha", {
+    ops: [{ op: "note", text: "full analysis (2p)", x: 1800, y: 1000, link: "http://127.0.0.1:1/d/x.md" }],
+  });
+  const { data: scene } = await api("GET", "/scene");
+  const note = scene.elements.find((e) => e.id === op.ids[0]);
+  assert.equal(note.link, "http://127.0.0.1:1/d/x.md", "summaries surface the link");
+
+  const dDir = path.join(stateDir, "deliverables");
+  fs.mkdirSync(dDir, { recursive: true });
+  fs.writeFileSync(path.join(dDir, "analysis.md"), "# hello board");
+  const res = await fetch(`http://127.0.0.1:${port}/d/analysis.md`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /text\/plain/);
+  assert.equal(await res.text(), "# hello board");
+
+  const evil = await fetch(`http://127.0.0.1:${port}/d/..%2Froom.json`);
+  assert.equal(evil.status, 400, "path traversal is rejected");
 });
 
 test("agents can join and detach at runtime", async () => {

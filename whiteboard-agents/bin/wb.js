@@ -231,8 +231,8 @@ const HELP = `wb — whiteboard agent control
 setup (one host process per room carries all agent identities):
   wb start --room <link> --agent <name> [--color <hex>] [--bg <hex>] [--slot <n>]
                                               spawn the room host, or join it if already up
-  wb up --room <link> [--personas <file>] [--on-change '<cmd>']
-                                              start/complete the whole cast (agents/personas.json);
+  wb up --room <link> [--count <n>|--names a,b,c] [--on-change '<cmd>']
+                                              start/complete a neutral crew (default Agent-1..3);
                                               --on-change runs <cmd> when the board changes and no
                                               brain is long-polling (env: WB_ROOM WB_AGENTS WB_REASON)
   wb list                                     running rooms and their agents
@@ -256,12 +256,18 @@ observing (all target one agent; --agent needed when several run):
 
 acting:
   wb op --json '<op-or-{"ops":[...]}>'        high-level ops (see below); or pipe JSON on stdin
-  wb note --text "..." [--near <id>] [--x --y] [--bg <hex>] [--width <n>] [--ack-of <id>]
-  wb text --text "..." [--near <id>] [--x --y] [--size <n>]
+  wb note --text "..." [--near <id>] [--x --y] [--bg <hex>] [--width <n>] [--link <url>] [--ack-of <id>]
+  wb text --text "..." [--near <id>] [--x --y] [--size <n>] [--link <url>]
   wb arrow --from <id> --to <id> [--label "..."] [--style dashed]
+                                              binds to both endpoints (follows drags); label rides the arrow
+  wb publish --file <path> [--name <name>]    copy a file into the room's deliverables dir and
+                                              print its http://127.0.0.1 URL for --link
   wb react --target <id> [--emoji "💡"]
   wb sketch --kind circle|underline|check --target <id>
-  wb status --text "..."                      update this agent's status card
+  wb status --text "..."                      update this agent's status card (its FIXED Role
+                                              line belongs to the user and is preserved)
+  wb claim --ids <id,id,...> [--release]      reserve elements you'll respond to; denied ids
+                                              mean a sibling has them (claims expire after 10m)
   wb cursor --x <n> --y <n> [--ms <n>] | --target <id>
   wb gesture --kind point|circle|wave --target <id>
   wb ack --ids <id,id,...> [--glance]         mark changes as seen
@@ -334,12 +340,26 @@ try {
     case "up": {
       if (!args.room) die("up requires --room");
       const room = resolveRoom();
-      const file = args.personas || path.join(PKG_ROOT, "agents", "personas.json");
-      const personas = JSON.parse(fs.readFileSync(file, "utf8")).personas;
-      const specs = personas.map((p, i) => ({
-        name: p.name,
-        color: p.color,
-        background: p.background,
+      // a neutral crew: interchangeable workers, told apart by color and slot.
+      // Roles are not baked in — the user pins one by editing the FIXED Role
+      // line on an agent's status card.
+      const PALETTE = [
+        { color: "#1971c2", background: "#a5d8ff" },
+        { color: "#2f9e44", background: "#b2f2bb" },
+        { color: "#6741d9", background: "#d0bfff" },
+        { color: "#e8590c", background: "#ffd8a8" },
+        { color: "#c2255c", background: "#fcc2d7" },
+        { color: "#0c8599", background: "#99e9f2" },
+      ];
+      const names = args.names
+        ? String(args.names).split(",").map((s) => s.trim()).filter(Boolean)
+        : Array.from(
+            { length: Math.max(1, Math.min(6, Number(args.count || 3))) },
+            (_, i) => `Agent-${i + 1}`,
+          );
+      const specs = names.map((name, i) => ({
+        name,
+        ...PALETTE[i % PALETTE.length],
         slot: i,
       }));
       const existing = aliveRoom(room.roomId);
@@ -525,6 +545,7 @@ try {
         ...(args.color ? { color: args.color } : {}),
         ...(args.width ? { width: Number(args.width) } : {}),
         ...(args.size ? { size: Number(args.size) } : {}),
+        ...(args.link ? { link: args.link } : {}),
         ...(args["ack-of"] ? { ackOf: args["ack-of"], kind: "ack" } : {}),
       };
       print(await call(info, "POST", withAgent("/op", agent), { ops: [op] }));
@@ -611,9 +632,37 @@ try {
       );
       break;
     }
+    case "claim": {
+      const { info, agent } = resolveTarget();
+      print(
+        await call(info, "POST", withAgent("/claim", agent), {
+          ids: String(args.ids || args.id || "").split(",").filter(Boolean),
+          release: !!args.release,
+        }),
+      );
+      break;
+    }
     case "save": {
       const { info } = resolveTarget({ agentRequired: false });
       print(await call(info, "POST", "/save"));
+      break;
+    }
+
+    case "publish": {
+      // place a file in the room's deliverables dir and print its served URL,
+      // ready for `wb note --link`
+      if (!args.file) die("publish requires --file <path>");
+      const { info } = resolveTarget({ agentRequired: false });
+      const src = path.resolve(args.file);
+      if (!fs.existsSync(src)) die(`no such file: ${src}`);
+      const dir =
+        process.env.WB_DELIVERABLES_DIR ||
+        path.resolve(STATE_DIR, "..", "deliverables", info.roomId);
+      fs.mkdirSync(dir, { recursive: true });
+      const name = args.name || path.basename(src);
+      const dest = path.join(dir, name);
+      if (src !== dest) fs.copyFileSync(src, dest);
+      print({ ok: true, path: dest, url: `http://127.0.0.1:${info.port}/d/${encodeURIComponent(name)}` });
       break;
     }
 
