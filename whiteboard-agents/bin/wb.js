@@ -255,11 +255,18 @@ observing (all target one agent; --agent needed when several run):
   wb journal [--tail <n>]                     the room's replayable session journal (jsonl)
 
 acting:
-  wb op --json '<op-or-{"ops":[...]}>'        high-level ops (see below); or pipe JSON on stdin
+  wb op --json '<op-or-{"ops":[...]}>' [--group]   high-level ops (see below); or pipe JSON on stdin.
+                                              --group (or "group":true) makes every element the batch
+                                              creates share one groupId — a composite that moves as one
+                                              piece. Ops may carry "ref":"a"; later ops in the batch may
+                                              use "$a" in near/from/to/target/ack-of/id.
   wb note --text "..." [--near <id>] [--x --y] [--bg <hex>] [--width <n>] [--link <url>] [--ack-of <id>]
   wb text --text "..." [--near <id>] [--x --y] [--size <n>] [--link <url>]
   wb arrow --from <id> --to <id> [--label "..."] [--style dashed]
                                               binds to both endpoints (follows drags); label rides the arrow
+  wb image --file <path> [--near <id>] [--x --y] [--w <n>] [--link <url>]
+                                              put a real image on the board (png/jpg/gif/webp/svg —
+                                              encrypted + uploaded to room storage)
   wb publish --file <path> [--name <name>]    copy a file into the room's deliverables dir and
                                               print its http://127.0.0.1 URL for --link
   wb react --target <id> [--emoji "💡"]
@@ -269,11 +276,13 @@ acting:
   wb claim --ids <id,id,...> [--release]      reserve elements you'll respond to; denied ids
                                               mean a sibling has them (claims expire after 10m)
   wb cursor --x <n> --y <n> [--ms <n>] | --target <id>
-  wb gesture --kind point|circle|wave --target <id>
+  wb gesture --kind point|circle|wave|dance --target <id>
+                                              dance = the "working on this" square, also auto-played
+                                              beside an element when its claim is granted
   wb ack --ids <id,id,...> [--glance]         mark changes as seen
   wb save                                     force persistence to excalidraw's backend
 
-ops for \`wb op\`: note, text, shape, arrow, react, sketch, frame, status, update, delete, raw
+ops for \`wb op\`: note, text, shape, arrow, react, sketch, frame, status, image, update, delete, raw
 `;
 
 try {
@@ -527,9 +536,23 @@ try {
       const json = args.json || (await readStdin());
       if (!json) die("op requires --json or JSON on stdin");
       const body = JSON.parse(json);
-      print(
-        await call(info, "POST", withAgent("/op", agent), body.ops ? body : { ops: [body] }),
-      );
+      const payload = body.ops ? body : { ops: [body] };
+      if (args.group) payload.group = true;
+      print(await call(info, "POST", withAgent("/op", agent), payload));
+      break;
+    }
+    case "image": {
+      if (!args.file) die("image requires --file <path>");
+      const { info, agent } = resolveTarget();
+      const op = {
+        op: "image",
+        file: path.resolve(args.file),
+        ...(args.near ? { near: args.near } : {}),
+        ...(args.x != null ? { x: Number(args.x), y: Number(args.y) } : {}),
+        ...(args.w ? { w: Number(args.w) } : {}),
+        ...(args.link ? { link: args.link } : {}),
+      };
+      print(await call(info, "POST", withAgent("/op", agent), { ops: [op] }));
       break;
     }
     case "note":

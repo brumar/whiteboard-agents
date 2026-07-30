@@ -36,7 +36,8 @@ room host ── 🤖 Agent-1 ──────┤        ▲
     room in Firebase Storage (compressData envelope, format pinned from
     upstream), in-memory LRU + on-disk cache
 - **`bin/wb.js`** — CLI over the room host: `start/up/stop`, `scene/diff/wait`,
-  `render`, `file`, `note/text/arrow/react/sketch/status/cursor/gesture/ack/claim/publish/save`
+  `render`, `file`, `note/text/arrow/image/react/sketch/status/cursor/gesture/ack/claim/publish/save`
+  (batches can be grouped into one movable composite via `op --group` + `"$ref"` wiring)
 - **`bin/render.js`** — one-shot offline render to PNG (prefers a live host's
   warm renderer; also great for CI)
 - **`deliverables/<roomId>/`** — rich content the agents publish (analyses,

@@ -64,6 +64,9 @@ node bin/wb.js claim --agent <Name> --ids <id> --release     # changed your mind
 ```
 
 - Claim an element **before** responding to it; only work items you were granted.
+  A granted claim makes your cursor dance a little square beside the element —
+  that's the human-visible "I'm on this" signal, free of charge. For longer
+  work sessions next to someone's ink, refresh it: `wb gesture --kind dance --target <id>`.
 - A denial means a sibling has it: skip it, don't duplicate. Diff entries
   already claimed show `claimedBy` — don't even try those.
 - Release claims you won't act on; unreleased claims expire after 10 min.
@@ -102,12 +105,39 @@ Each iteration is one **cycle**:
    pick the most valuable unclaimed change, claim it, respond with whatever move
    fits (INTERACTIONS.md is the menu: extend, reframe, example, connect,
    challenge, visualize, cluster…). Under a fixed role, filter moves through
-   that role. Place ink near what it responds to (`--near <id>`); link your
-   contribution back with a **bound arrow**:
-   `wb arrow --from <yourNote> --to <theirIdea> --label "answers"` — arrows now
-   attach to both endpoints and follow drags; keep labels ≤3 words.
+   that role. Place ink near what it responds to (`--near <id>`) and link it
+   with a **bound arrow flowing outward from the human's ink**:
+   `wb arrow --from <theirIdea> --to <yourNote> --label "answers"`. The
+   direction rule is firm: arrows leave what's being responded to and point at
+   the response — never into the human's note. Arrows attach to both endpoints
+   (they follow drags); keep labels ≤3 words.
    Claim denied, or nothing real to add? Skip — silence is a move.
    If the board stayed quiet for many cycles and is sparse, you may plant one seed question.
+
+   **Association duty** — a new human note usually belongs with exactly one
+   earlier element. When the connection is clear, claim the new note and draw
+   it: `wb arrow --from <newNote> --to <itsAssociate> --label "<relation>"`
+   ("refines", "example", "tension"). This is a full contribution for the
+   cycle; skip it when nothing genuinely relates — a wrong association is
+   worse than none.
+
+   **Think visually, compose in one go** — a small diagram beats a paragraph.
+   Build multi-block contributions (shapes, notes, arrows, even an image) as
+   ONE batch so they land together and move as a single piece:
+   ```bash
+   node bin/wb.js op --agent <Name> --group --json '{"ops":[
+     {"op":"note","text":"cause","x":800,"y":400,"ref":"a"},
+     {"op":"note","text":"effect","x":1100,"y":400,"ref":"b"},
+     {"op":"arrow","from":"$a","to":"$b","label":"drives"},
+     {"op":"image","file":"/tmp/chart.png","x":800,"y":520}
+   ]}'
+   ```
+   `--group` gives every created element one groupId (the human drags it as a
+   unit); `"ref"`/`"$ref"` wires arrows between blocks born in the same batch.
+   `wb image --file <path>` also works standalone — real images (a rendered
+   chart, a downloaded figure, a diagram you generated) are often the densest
+   thing you can add. Never a wall of text when a picture or a published
+   deliverable does it better.
 7. **Rich content goes in files, not walls of text** — whenever a contribution
    wants more than ~40 words (a synthesis, research, a table, code, a
    pre-read), write it to a file and put a *link* on the board:

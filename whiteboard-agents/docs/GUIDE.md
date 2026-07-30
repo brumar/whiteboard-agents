@@ -172,7 +172,11 @@ argv, logs, and error messages (it's actively redacted).
 - **Full element repertoire**: sticky notes with bound text (and optional
   hyperlinks), plain text, shapes with labels, bound arrows (attached to both
   endpoints so they re-route when you drag things, with native labels riding
-  the arrow), emoji reactions, hand-drawn underlines/checks/highlight rings, frames.
+  the arrow), real images (encrypted + uploaded to room storage), emoji
+  reactions, hand-drawn underlines/checks/highlight rings, frames. Batched ops
+  can be **grouped** into one composite that moves as a single piece
+  (`wb op --group`, with `"$ref"` wiring for arrows between blocks of the
+  same batch).
 - **Rich deliverables**: `wb publish` drops any file into
   `deliverables/<roomId>/` and the host serves it at `/d/<name>` — notes link
   to real documents instead of becoming walls of text (the host re-uses its
@@ -358,12 +362,16 @@ elements that survive excalidraw's `restoreElements` (validated in tests):
   agent's diff can miss a deletion, and ghosts eventually leave the persisted
   scene too.
 - **High-level ops** (`applyOp`): `note`, `text`, `shape` (+label), `arrow`
-  (from/to element ids, auto edge-to-edge, optional label), `react` (emoji
-  pinned near the target), `sketch` (underline / check / highlight-circle as
+  (from/to element ids, auto edge-to-edge, bound to both endpoints, native
+  bound label), `image` (encrypt + upload a local file to room storage, seed
+  the local cache, sized from the image header), `react` (emoji pinned near
+  the target), `sketch` (underline / check / highlight-circle as
   freedraw/ellipse), `frame`, `status` (one per-agent card in the "🤖 Agents"
   corner frame at fixed coordinates, updated in place via a deterministic
   element id — its `FIXED Role:` line is parsed from the existing card and
-  preserved, never overwritten), `update`, `delete`, `raw`. Ops auto-place via `placeNear` →
+  preserved, never overwritten), `update`, `delete`, `raw`. A `/op` batch with
+  `group: true` stamps one groupId across everything it creates, and ops may
+  carry `ref` so later ops in the batch address them as `"$ref"`. Ops auto-place via `placeNear` →
   `findFreeSpace`, and most ops first `visit()` the spot — the cursor travels
   there before ink appears, so actions read sequentially, like someone working.
 - **Observability**: an append-only `journal.jsonl` (rotated at 10 MB) records

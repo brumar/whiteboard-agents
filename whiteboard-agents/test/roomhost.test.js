@@ -292,6 +292,62 @@ test("notes carry hyperlinks; deliverables are served over /d/", async () => {
   assert.equal(evil.status, 400, "path traversal is rejected");
 });
 
+test("grouped batches build one movable composite; refs wire arrows inside it", async () => {
+  const { data: op } = await api("POST", "/op?agent=Alpha", {
+    group: true,
+    ops: [
+      { op: "note", text: "premise", x: 2200, y: 1000, ref: "a" },
+      { op: "note", text: "conclusion", x: 2600, y: 1000, ref: "b" },
+      { op: "arrow", from: "$a", to: "$b", label: "therefore" },
+    ],
+  });
+  assert.ok(op.groupId, "grouped batches return their groupId");
+
+  const { data: scene } = await api("GET", "/scene?full=1");
+  const created = scene.elements.filter((e) => op.ids.includes(e.id));
+  assert.equal(created.length, 6); // 2 × (container+text) + arrow + label
+  for (const el of created) {
+    if (el.containerId) continue; // bound text follows its container
+    assert.ok(
+      (el.groupIds || []).includes(op.groupId),
+      `${el.type} carries the batch groupId`,
+    );
+  }
+  const arrow = created.find((e) => e.type === "arrow");
+  assert.equal(arrow.startBinding?.elementId, op.ids[0], "$a resolved to the first note");
+  assert.equal(arrow.endBinding?.elementId, op.ids[2], "$b resolved to the second note");
+});
+
+test("agents can put a real image on the board", async () => {
+  // 1x1 transparent png
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  const p = path.join(stateDir, "probe.png");
+  fs.writeFileSync(p, png);
+  const { data: op } = await api("POST", "/op?agent=Alpha", {
+    ops: [{ op: "image", file: p, x: 3000, y: 1000 }],
+  });
+  const { data: scene } = await api("GET", "/scene");
+  const img = scene.elements.find((e) => e.id === op.ids[0]);
+  assert.equal(img.type, "image");
+  assert.ok(img.hasImage && img.fileId, "summaries flag the image");
+
+  // served from the local cache without touching room storage (WB_NO_PERSIST)
+  const res = await fetch(`http://127.0.0.1:${port}/file?id=${img.fileId}`);
+  assert.equal(res.status, 200);
+  assert.ok(Buffer.from(await res.arrayBuffer()).equals(png), "decrypted bytes round-trip");
+});
+
+test("dance is a known gesture kind", async () => {
+  const { data: op } = await api("POST", "/op?agent=Alpha", {
+    ops: [{ op: "text", text: "dance floor", x: 3400, y: 1000 }],
+  });
+  const g = await api("POST", "/gesture?agent=Alpha", { kind: "dance", target: op.ids[0] });
+  assert.equal(g.status, 200);
+});
+
 test("agents can join and detach at runtime", async () => {
   const { data: joined } = await api("POST", "/agents", { name: "Gamma", color: "#f08c00" });
   assert.equal(joined.agent, "Gamma");

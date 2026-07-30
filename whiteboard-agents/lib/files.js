@@ -88,7 +88,7 @@ export async function decodeFileBlob(roomKey, blob) {
 }
 
 // Inverse of decodeFileBlob — same envelope excalidraw's encodeFilesForUpload
-// produces. Used by tests and fixtures; agents don't upload files (yet).
+// produces. Used by the image op, tests and fixtures.
 export async function encodeFileBlob(roomKey, { id, mimeType, bytes, created = Date.now() }) {
   const dataURL = `data:${mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
   const metadata = { id, mimeType, created, lastRetrieved: created };
@@ -116,6 +116,68 @@ export async function fetchFileBlob(roomId, fileId) {
   }
   if (!res.ok) throw new Error(`file fetch failed: ${res.status} ${await res.text()}`);
   return new Uint8Array(await res.arrayBuffer());
+}
+
+// Upload an encoded blob where collaborators' excalidraw will look for it —
+// the multipart flavor of the Storage REST API, same as the SDK's uploadBytes.
+export async function uploadFileBlob(roomId, fileId, blob) {
+  const name = `files/rooms/${roomId}/${fileId}`;
+  const boundary = "wbfile" + Math.random().toString(36).slice(2);
+  const meta = JSON.stringify({ name, contentType: "application/octet-stream" });
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\ncontent-type: application/json; charset=utf-8\r\n\r\n${meta}\r\n--${boundary}\r\ncontent-type: application/octet-stream\r\n\r\n`,
+    ),
+    Buffer.from(blob),
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+  const res = await fetch(`${storageBase()}?name=${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: {
+      "x-goog-upload-protocol": "multipart",
+      "content-type": `multipart/related; boundary=${boundary}`,
+    },
+    body,
+  });
+  if (!res.ok) throw new Error(`file upload failed: ${res.status} ${await res.text()}`);
+}
+
+// Pixel dimensions from image headers — enough for png/jpeg/gif/webp, the
+// formats worth placing on a board. Returns null when it can't tell.
+export function imageSize(bytes) {
+  const b = toU8(bytes);
+  const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  // PNG: IHDR width/height at fixed offsets
+  if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+    return { width: view.getUint32(16), height: view.getUint32(20) };
+  }
+  // GIF: little-endian logical screen size
+  if (b.length > 10 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) {
+    return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
+  }
+  // JPEG: walk segments to the first SOF marker
+  if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) break;
+      const marker = b[i + 1];
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { width: view.getUint16(i + 7), height: view.getUint16(i + 5) };
+      }
+      i += 2 + view.getUint16(i + 2);
+    }
+    return null;
+  }
+  // WebP (VP8X extended header)
+  if (b.length > 30 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) {
+    if (b[12] === 0x56 && b[13] === 0x50 && b[14] === 0x38 && b[15] === 0x58) {
+      return {
+        width: 1 + (b[24] | (b[25] << 8) | (b[26] << 16)),
+        height: 1 + (b[27] | (b[28] << 8) | (b[29] << 16)),
+      };
+    }
+  }
+  return null;
 }
 
 // Per-room file cache: encrypted blobs on disk (same trust domain as
@@ -168,5 +230,19 @@ export function createFileStore({ roomId, roomKey, dir }) {
     },
     cached: (fileId) =>
       mem.has(fileId) || (SAFE_ID.test(String(fileId)) && fs.existsSync(path.join(dir, fileId))),
+    // seed the cache with a blob we produced ourselves (agent image uploads),
+    // so /file and /render serve it without a network round-trip
+    async store(fileId, blob) {
+      if (!SAFE_ID.test(String(fileId))) {
+        throw Object.assign(new Error(`invalid file id: ${fileId}`), { status: 400 });
+      }
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, fileId), blob);
+      } catch {}
+      const decoded = await decodeFileBlob(roomKey, blob);
+      remember(fileId, decoded);
+      return decoded;
+    },
   };
 }

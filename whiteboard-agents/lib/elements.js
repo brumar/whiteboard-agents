@@ -302,6 +302,23 @@ export function makeFreedraw({ points, x, y, strokeColor = "#1e1e1e", strokeWidt
   });
 }
 
+export function makeImage({ x, y, width, height, fileId, link = null, customData }) {
+  return base({
+    type: "image",
+    x,
+    y,
+    width,
+    height,
+    strokeColor: "transparent",
+    link,
+    customData,
+    fileId,
+    status: "saved", // already uploaded to room storage when the element lands
+    scale: [1, 1],
+    crop: null,
+  });
+}
+
 export function makeFrame({ x, y, width, height, name, customData }) {
   return base({
     type: "frame",

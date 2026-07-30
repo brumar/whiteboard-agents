@@ -7,10 +7,11 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { ExcalidrawClient } from "./client.js";
 import { loadScene, mergeSaveScene, getSceneVersion } from "./persistence.js";
-import { createFileStore } from "./files.js";
+import { createFileStore, encodeFileBlob, uploadFileBlob, imageSize } from "./files.js";
 import {
   makeText,
   makeShape,
@@ -18,12 +19,14 @@ import {
   makeArrow,
   makeFreedraw,
   makeFrame,
+  makeImage,
   indexAfter,
   maxIndex,
   bbox,
   findFreeSpace,
   edgeToEdge,
   measureText,
+  randomElementId,
 } from "./elements.js";
 
 export const HOST_VERSION = 2; // bumped on breaking info-file / API changes
@@ -628,6 +631,12 @@ export async function runRoomHost(opts) {
         idx = indexAfter(idx);
         el.index = idx;
       }
+      // grouped batch (/op with group:true): stamp every top-level element so
+      // the whole contribution moves as one piece. Bound text follows its
+      // container anyway, frames can't be grouped.
+      if (agent.pendingGroupId && !el.containerId && el.type !== "frame") {
+        el.groupIds = [...(el.groupIds || []), agent.pendingGroupId];
+      }
       el.customData = { ...(el.customData || {}), wb: { agent: agent.name, ...(el.customData?.wb || {}) } };
       agent.seen.set(el.id, el.version); // own work is pre-acked
     }
@@ -782,6 +791,41 @@ export async function runRoomHost(opts) {
         // allowed even on human ink, pre-acked for every agent.
         if (fromEl && toEl) await registerArrowOnEndpoints(agent, [fromEl, toEl], el.id);
         return ids;
+      }
+      case "image": {
+        // A real image element: encrypt + upload the file to room storage
+        // (collaborators' excalidraw fetches it by fileId), seed the local
+        // cache so /file and /render serve it instantly.
+        if (!op.file) throw new Error("image: requires file (path on this machine)");
+        const bytes = new Uint8Array(fs.readFileSync(op.file));
+        const mimeType = {
+          ".png": "image/png",
+          ".jpg": "image/jpeg",
+          ".jpeg": "image/jpeg",
+          ".gif": "image/gif",
+          ".webp": "image/webp",
+          ".svg": "image/svg+xml",
+        }[path.extname(op.file).toLowerCase()];
+        if (!mimeType) throw new Error(`image: unsupported file type ${op.file}`);
+        const fileId = createHash("sha1").update(bytes).digest("hex"); // excalidraw's own id scheme
+        const dims = imageSize(bytes) || { width: 400, height: 300 };
+        const width = op.w || Math.min(dims.width, 480);
+        const height = Math.round(dims.height * (width / dims.width));
+        const blob = await encodeFileBlob(roomKey, { id: fileId, mimeType, bytes });
+        await fileStore.store(fileId, blob);
+        if (!NO_PERSIST) await uploadFileBlob(roomId, fileId, blob);
+        const pos = op.x != null ? { x: op.x, y: op.y } : placeNear(op.near, width, height);
+        const el = makeImage({
+          x: pos.x,
+          y: pos.y,
+          width,
+          height,
+          fileId,
+          link: op.link || null,
+          customData: { wb: { kind: "image" } },
+        });
+        await visit(agent, pos.x + width / 2, pos.y - 20);
+        return insertElements(agent, [el]);
       }
       case "react": {
         const t = bbox(getEl(op.target));
@@ -977,6 +1021,21 @@ export async function runRoomHost(opts) {
     await new Promise((r) => setTimeout(r, ms + 150));
   }
 
+  // A happy little square danced twice beside an element — the "I'm working
+  // on this" signal. Presence only, no ink; auto-played on granted claims.
+  function enqueueSquareDance(agent, t) {
+    const s = 36;
+    const x0 = t.x + t.w + 24;
+    const y0 = t.y - 10;
+    for (let lap = 0; lap < 2; lap++) {
+      enqueueMove(agent, x0, y0, 170);
+      enqueueMove(agent, x0 + s, y0, 170);
+      enqueueMove(agent, x0 + s, y0 + s, 170);
+      enqueueMove(agent, x0, y0 + s, 170);
+    }
+    enqueueMove(agent, x0, y0, 170);
+  }
+
   // ---- waiters: debounced event wake + fallback sweep --------------------------
   // waiters: Array<{agent, respond, timer}>
   const waiters = [];
@@ -1141,12 +1200,15 @@ export async function runRoomHost(opts) {
 
   // ---- live viewer (P9a): /view + SSE /events, read-only ------------------------
   const sseClients = new Set();
-  const sseSend = (payload) => {
+  // var, not const: scene events can fire before execution reaches this block,
+  // and pushSceneToViewers (hoisted) must see undefined, not a TDZ ReferenceError
+  var sseSend = (payload) => {
     if (!sseClients.size) return;
     const msg = `data: ${JSON.stringify(payload)}\n\n`;
     for (const res of sseClients) res.write(msg);
   };
   function pushSceneToViewers() {
+    if (!sseSend) return;
     sseSend({ type: "scene", elements: getElements({ includeDeleted: false }) });
   }
   // cursor stream: agents' animated cursors + human peers, ~7fps, only on movement
@@ -1371,11 +1433,37 @@ export async function runRoomHost(opts) {
             return respond(409, { error: "paused by board directive (@agents resume to continue)" });
           }
           takeOpTokens(agent, ops.length);
+          // group:true → every element the batch creates shares one groupId,
+          // so a composite contribution moves as a single piece.
+          const groupId = body.group ? randomElementId() : null;
+          // ops may carry "ref"; later ops in the batch address the elements
+          // it created via "$<ref>" in near/from/to/target/ackOf/id.
+          const refs = new Map();
+          const deref = (op) => {
+            const out = { ...op };
+            for (const k of ["near", "from", "to", "target", "ackOf", "id"]) {
+              if (typeof out[k] === "string" && out[k].startsWith("$")) {
+                const id = refs.get(out[k].slice(1));
+                if (!id) throw new Error(`unknown ref ${out[k]} (set "ref" on an earlier op in the batch)`);
+                out[k] = id;
+              }
+            }
+            return out;
+          };
           const ids = [];
-          for (const op of ops) ids.push(...(await applyOp(agent, op)));
+          agent.pendingGroupId = groupId;
+          try {
+            for (const op of ops) {
+              const created = await applyOp(agent, deref(op));
+              if (op.ref) refs.set(op.ref, created[0]);
+              ids.push(...created);
+            }
+          } finally {
+            agent.pendingGroupId = null;
+          }
           logEvent(`ops[${agent.name}]: ${ops.map((o) => o.op).join(",")} -> ${ids.join(",")}`);
           journal({ agent: agent.name, event: "op", ids, summary: ops.map((o) => o.op).join(",") });
-          return respond(200, { ids });
+          return respond(200, { ids, ...(groupId ? { groupId } : {}) });
         }
         if (url.pathname === "/agents") {
           const agent = await addAgent({
@@ -1418,6 +1506,8 @@ export async function runRoomHost(opts) {
             for (let i = 0; i < 6; i++) {
               enqueueMove(agent, cx + (i % 2 ? 25 : -25), cy, 160);
             }
+          } else if (body.kind === "dance") {
+            enqueueSquareDance(agent, t);
           } else {
             // point: approach then nudge
             enqueueMove(agent, cx + 18, cy + 18, 700);
@@ -1457,6 +1547,14 @@ export async function runRoomHost(opts) {
           }
           if (granted.length)
             journal({ agent: agent.name, event: body.release ? "release" : "claim", ids: granted });
+          // "I've got this one": dance a little square beside the claimed work
+          if (!body.release && granted.length && !state.paused) {
+            const t = bbox(getEl(granted[0]));
+            if (t) {
+              startAnimLoop();
+              enqueueSquareDance(agent, t);
+            }
+          }
           return respond(200, { granted, denied });
         }
         if (url.pathname === "/ack") {

@@ -71,7 +71,12 @@ node bin/wb.js note --text "..." [--near <id>] [--x 100 --y 200] [--bg "#fff9db"
 node bin/wb.js text --text "..." [--near <id>] [--size 20] [--link <url>]
 node bin/wb.js arrow --from <id> --to <id> [--label "feeds into"] [--style dashed]
                                                    # binds to both endpoints (follows drags); the label
-                                                   # is bound to the arrow and stays centered on it
+                                                   # is bound to the arrow and stays centered on it.
+                                                   # Direction convention: outward from the human's ink
+                                                   # (idea → response, new note → its context)
+node bin/wb.js image --file <path> [--near <id>] [--x --y] [--w 480] [--link <url>]
+                                                   # real image element: encrypted + uploaded to room
+                                                   # storage, so collaborators and the renderer see it
 node bin/wb.js react --target <id> --emoji "💡"
 node bin/wb.js sketch --kind circle|underline|check --target <id>
 node bin/wb.js status --text "watching · last: acked 2 notes"   # agent's card in the 🤖 corner;
@@ -79,13 +84,19 @@ node bin/wb.js status --text "watching · last: acked 2 notes"   # agent's card 
 node bin/wb.js publish --file <path> [--name x.md] # drop a file in deliverables/<roomId>/, prints the
                                                    # localhost URL to use with --link (rich content pattern)
 node bin/wb.js cursor --target <id>                # or --x --y [--ms 800]
-node bin/wb.js gesture --kind point|circle|wave --target <id>
+node bin/wb.js gesture --kind point|circle|wave|dance --target <id>
+                                                   # dance = "working on this" square; auto-played
+                                                   # beside an element when its claim is granted
 node bin/wb.js save                                # force-persist (auto after every op)
 ```
 
-Complex/batched: `node bin/wb.js op --json '{"ops":[...]}'` with ops
-`note | text | shape | arrow | react | sketch | frame | status | update | delete | raw`
+Complex/batched: `node bin/wb.js op --json '{"ops":[...]}' [--group]` with ops
+`note | text | shape | arrow | react | sketch | frame | status | image | update | delete | raw`
 (same fields as the flags; `update`/`delete` take `id` and work only on the agent's own elements).
+`--group` (or `"group": true` in the body) stamps one shared groupId on every element the batch
+creates — the composite moves as a single piece. Ops may carry `"ref": "a"` so later ops in the
+same batch can point at them with `"$a"` in `near`/`from`/`to`/`target` — that's how you wire
+arrows between blocks born in the same call.
 
 - Every agent-scoped read also returns `role` (the FIXED Role pinned on the
   agent's card, `"None"` by default), the agent's active `claims`, and — right

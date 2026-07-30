@@ -7,6 +7,7 @@ import {
   makeArrow,
   makeFreedraw,
   makeFrame,
+  makeImage,
   indexAfter,
   maxIndex,
   bbox,
@@ -72,6 +73,15 @@ test("makeFrame survives restore with its name", () => {
   const [r] = surviveRestore([makeFrame({ x: 0, y: 0, width: 300, height: 200, name: "🤖 Agents" })]);
   assert.equal(r.type, "frame");
   assert.equal(r.name, "🤖 Agents");
+});
+
+test("makeImage survives restore with its fileId", () => {
+  const [r] = surviveRestore([
+    makeImage({ x: 0, y: 0, width: 320, height: 240, fileId: "a".repeat(40) }),
+  ]);
+  assert.equal(r.type, "image");
+  assert.equal(r.fileId, "a".repeat(40));
+  assert.equal(r.status, "saved");
 });
 
 test("customData rides through restore (authorship survives)", () => {

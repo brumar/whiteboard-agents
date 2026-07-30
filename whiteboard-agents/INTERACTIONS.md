@@ -17,6 +17,7 @@ between "a script edited my file" and "someone is here with me".
 | **Glance** | cursor flies over to a new element, hovers a beat | within seconds of any human edit (automatic in the daemon) |
 | **Point** | cursor taps an element three times | "look at this" — before or instead of writing about it |
 | **Orbit** | cursor circles an element | "I'm considering this one" — while composing a response to it |
+| **Dance** | cursor traces a small square twice beside an element | "claimed, working on this" — auto-played when a claim is granted; refresh with `gesture --kind dance` during longer work |
 | **Wave** | quick zigzag | greeting when the human joins the room |
 
 Presence moves are free: they never clutter the board, so they have no budget.
@@ -42,11 +43,12 @@ contributions, but never zero acknowledgments when human work appeared.
 
 | Move | Form | Discipline |
 |---|---|---|
-| **Extend** | 1–2 branch notes off a human idea, arrows pointing back | concrete > abstract; leave room for the human's own branches |
+| **Extend** | 1–2 branch notes off a human idea, arrows flowing from the idea out to your branches | concrete > abstract; leave room for the human's own branches |
 | **Reframe** | restate an idea crisply next to the original: "in other words…" | never replaces the original |
 | **Seed** | an open question planted in empty space when the board is quiet | max one live seed per agent; delete your seed once it sprouts |
 | **Example** | a tiny concrete instance under an abstract claim | the fastest way to test an idea is to instantiate it |
 | **Visualize** | turn a text list into shapes + arrows in adjacent space | propose, don't replace: the human deletes their list if convinced |
+| **Composite** | several blocks — shapes, notes, internal arrows, even an image — created in one grouped batch (`wb op --group`, `"$ref"` wiring) that moves as a single piece | one composite is one contribution; excalidraw is a visual medium, use it |
 | **Deliverable** | a real document (analysis, table, research, code) written to a file, `wb publish`ed, linked from a 1–3 line abstract note (`--link`) | the note is the abstract, the depth is one click away; prefer this over any note longer than ~40 words |
 
 ## 4. Structural moves (organizing)
@@ -54,6 +56,7 @@ contributions, but never zero acknowledgments when human work appeared.
 | Move | Form | Discipline |
 |---|---|---|
 | **Connect** | labeled arrow between two existing ideas ("same root cause", "tension", "feeds into") | only non-obvious links; one per cycle |
+| **Associate** | when a fresh human note belongs with an earlier element (usually exactly one), draw the arrow from the new note to its associate, short label | standing duty on every new human note; skip when nothing clearly relates — a wrong association is worse than none |
 | **Cluster** | named frame drawn in empty space + invitation note | agents never move human elements — they invite |
 | **Zone** | persistent named regions (Inbox, Parking lot, Decided) | only when the human asks or accepts a proposal |
 | **Thread** | numbered breadcrumbs (①②③) added near ideas to reveal a sequence | read-only annotation, trivially ignorable |
@@ -106,9 +109,11 @@ Friction is a gift when it's specific, answerable, and well-timed.
    the *visible* receipt (emoji, sketch, ack note) comes only from the agent
    who claimed the element — the human gets one receipt from the crew, not N.
 8. **Craft.** Arrows always `--from/--to` (bound, they survive drags), labels
-   ≤3 words. Anything longer than ~40 words becomes a published deliverable
-   with a linked abstract note. Render and *look* before placing ink in a
-   crowded area.
+   ≤3 words, and they flow **outward from the human's ink**: idea → response,
+   new note → its context, never into a human note. Multi-block contributions
+   land as one grouped composite, not scattered pieces. Anything longer than
+   ~40 words becomes a published deliverable with a linked abstract note.
+   Render and *look* before placing ink in a crowded area.
 
 ## The crew
 
